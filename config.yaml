@@ -1,0 +1,9 @@
+server:
+  hostname: "localhost"
+  port: 8080
+  endpoint: "http://localhost"
+routes:
+  - service: "home"
+    value: "/home"
+  - service: "register"
+    value: "/register"
