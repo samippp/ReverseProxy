@@ -7,3 +7,11 @@ routes:
     value: "/home"
   - service: "register"
     value: "/register"
+backends:
+  secret:
+    - name: "secret-1"
+      url: "http://localhost:9001"
+    - name: "secret-2"
+      url: "http://localhost:9002"
+    - name: "secret-3"
+      url: "http://localhost:9003"

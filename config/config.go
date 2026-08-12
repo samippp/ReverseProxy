@@ -11,8 +11,14 @@ import (
 )
 
 type ServerConfig struct {
-	Server Server  `yaml:"server"`
-	Routes []Route `yaml:"routes"`
+	Server   Server               `yaml:"server"`
+	Routes   []Route              `yaml:"routes"`
+	Backends map[string][]Backend `yaml:"backends"`
+}
+
+type Backend struct {
+	Name string `yaml:"name"`
+	URL  string `yaml:"url"`
 }
 
 type Server struct {
@@ -30,6 +36,7 @@ type EnvConfig struct {
 	ServerConfig string
 	DatabaseURL  string
 	JwtSecret    string
+	ProxySecret  string
 }
 
 func LoadEnv() *EnvConfig {
@@ -42,6 +49,7 @@ func LoadEnv() *EnvConfig {
 				ServerConfig: os.Getenv("SERVER_CONFIG"),
 				DatabaseURL:  os.Getenv("DATABASE_URL"),
 				JwtSecret:    os.Getenv("JWT_SECRET"),
+				ProxySecret:  os.Getenv("PROXY_SECRET"),
 			}
 		}
 		parent := filepath.Dir(dir)
@@ -52,7 +60,7 @@ func LoadEnv() *EnvConfig {
 	}
 }
 
-func ImportConfig() ServerConfig {
+func ImportServerConfig() ServerConfig {
 	LoadEnv()
 	serverConfigPath := os.Getenv("SERVER_CONFIG")
 	yamlFile, err := os.ReadFile(serverConfigPath)

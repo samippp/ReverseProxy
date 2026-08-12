@@ -65,7 +65,7 @@ func extractToken(r *http.Request) (string, error) {
 	return strings.TrimPrefix(authHeader, prefix), nil
 }
 
-func HandleAuthMiddleware(h http.Handler) http.Handler {
+func HandleAuthMiddleware(h http.Handler, proxySecret string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, err := extractToken(r)
 		if err != nil {
@@ -78,6 +78,7 @@ func HandleAuthMiddleware(h http.Handler) http.Handler {
 			return // proxy never runs
 		}
 		r.Header.Set("X-User-Id", claims.Subject)
+		r.Header.Set("X-Internal-Secret", proxySecret)
 		h.ServeHTTP(w, r) // now hits proxy.ServeHTTP
 	})
 }
