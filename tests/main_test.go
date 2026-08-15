@@ -31,25 +31,41 @@ func TestMain(m *testing.M) {
 	testPool = db.PostgreSQLConnectionPoll(env.DatabaseURL)
 	testStore = store.New(testPool)
 
-	// dummy backend that /protected/* proxies to during tests
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// dummy backends that /protected/* proxies to during tests —
+	// three, so round-robin behavior can actually be observed/tested
+	backend1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"secret":"ok"}`))
+		w.Write([]byte(`{"secret":"ok","backend":"1"}`))
 	}))
-	defer backend.Close()
+	backend2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"secret":"ok","backend":"2"}`))
+	}))
+	backend3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"secret":"ok","backend":"3"}`))
+	}))
 
 	cfg := config.ImportServerConfig()
-	cfg.Backends = []config.Backend{
-		{Name: "test-backend", URL: backend.URL},
+	cfg.Backends = map[string][]config.Backend{
+		"secret": {
+			{Name: "test-backend-1", URL: backend1.URL},
+			{Name: "test-backend-2", URL: backend2.URL},
+			{Name: "test-backend-3", URL: backend3.URL},
+		},
 	}
 
 	router := proxy.NewRouter(testPool, cfg, env)
 	testServer = httptest.NewServer(router)
 
 	code := m.Run()
+
 	testServer.Close()
-	backend.Close()
+	backend1.Close()
+	backend2.Close()
+	backend3.Close()
 	testPool.Close()
+
 	os.Exit(code)
 }
 
