@@ -9,9 +9,9 @@ routes:
     value: "/register"
 backends:
   secret:
-    - name: "secret-1"
+    - name: "backend-1"
       url: "http://localhost:9001"
-    - name: "secret-2"
+    - name: "backend-2"
       url: "http://localhost:9002"
-    - name: "secret-3"
+    - name: "backend-3"
       url: "http://localhost:9003"

@@ -55,7 +55,7 @@ func TestMain(m *testing.M) {
 		},
 	}
 
-	router := proxy.NewRouter(testPool, cfg, env)
+	router := proxy.NewRouter(testPool, cfg, env, 100*time.Millisecond)
 	testServer = httptest.NewServer(router)
 
 	code := m.Run()

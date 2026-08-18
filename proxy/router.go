@@ -12,14 +12,14 @@ import (
 	"github.com/samippp/ReverseProxy/store"
 )
 
-func NewRouter(pool *pgxpool.Pool, serverConfig config.ServerConfig, env *config.EnvConfig) *http.ServeMux {
+func NewRouter(pool *pgxpool.Pool, serverConfig config.ServerConfig, env *config.EnvConfig, healthCheckInterval time.Duration) *http.ServeMux {
 	s := store.New(pool)
 	h := api.New(s)
 	mux := http.NewServeMux()
 	// possibly a silent err if config.yaml does not have secret
 	secretBackends := serverConfig.Backends["secret"]
 	secretBalancer := NewRoundRobinBalancer(secretBackends)
-	secretBalancer.StartHealthChecks(5 * time.Second)
+	secretBalancer.StartHealthChecks(time.Duration(healthCheckInterval))
 	backendProxy := NewReverseProxy(secretBalancer)
 	mux.HandleFunc("/home", h.HomeHandler)
 	mux.HandleFunc("/register", h.RegisterHandler)

@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/samippp/ReverseProxy/config"
 	"github.com/samippp/ReverseProxy/db"
@@ -18,7 +19,7 @@ func main() {
 
 	fmt.Println("Gateway starting")
 	defer pool.Close()
-	mux := proxy.NewRouter(pool, serverConfig, env)
+	mux := proxy.NewRouter(pool, serverConfig, env, 5*time.Second)
 	addr := serverConfig.Server.Hostname + ":" + strconv.Itoa(serverConfig.Server.Port)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatal(err)
