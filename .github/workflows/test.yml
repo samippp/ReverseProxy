@@ -1,0 +1,53 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: reverseproxy_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Apply schema
+        run: |
+          psql -h localhost -U postgres -d reverseproxy_test -f db/schema.sql
+        env:
+          PGPASSWORD: postgres
+
+      - name: Write CI config files
+        run: |
+          cat > .env <<EOF
+          SERVER_CONFIG=./config.yaml
+          DATABASE_URL=postgres://postgres:postgres@localhost:5432/reverseproxy_test?sslmode=disable
+          JWT_SECRET=ci-test-jwt-secret
+          PROXY_SECRET=ci-test-proxy-secret
+          EOF
+
+      - name: Run tests
+        run: go test ./... -v
