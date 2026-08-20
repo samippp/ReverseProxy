@@ -22,12 +22,16 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	// Only a real, specific route — not a catch-all — so a broken
+	// path-stripping upstream shows up as a 404 here instead of being
+	// silently masked.
+	mux.HandleFunc("/secret", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{
 			"secret":  "ok",
 			"backend": *name,
+			"path":    r.URL.Path,
 		})
 	})
 
