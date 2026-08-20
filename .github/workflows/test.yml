@@ -43,7 +43,7 @@ jobs:
       - name: Write CI config files
         run: |
           cat > .env <<EOF
-          SERVER_CONFIG=./config.yaml
+          SERVER_CONFIG=${{ github.workspace }}/config.yaml
           DATABASE_URL=postgres://postgres:postgres@localhost:5432/reverseproxy_test?sslmode=disable
           JWT_SECRET=ci-test-jwt-secret
           PROXY_SECRET=ci-test-proxy-secret
