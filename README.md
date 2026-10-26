@@ -47,6 +47,51 @@ Tested locally with [`hey`](https://github.com/rakyll/hey) against 3 backend rep
 
 *\*Failover test: one backend was killed mid-run. Failures were bounded to a ~2-second window immediately following the kill — the time it took the health checker to detect the dead backend and stop routing to it. The remaining ~28 seconds of the 30-second test ran at 100% success across the two surviving backends, with zero manual intervention.*
 
+### Comparison with nginx
+
+The same workload through nginx 1.30 configured to do the gateway's job: round-robin over the same 3 dummy backends, `/protected` prefix stripping, and 100 keepalive connections per upstream (matching the gateway's `MaxIdleConnsPerHost`). A direct-to-backend run gives the no-proxy baseline.
+
+| Target | Concurrency | Req/s | p50 | p99 | Success |
+|---|---|---|---|---|---|
+| direct (1 backend) | 50 | 42,518 | 1.0ms | 3.3ms | 100% |
+| nginx | 50 | 20,735 | 2.2ms | 5.6ms | 100% |
+| **gateway** | 50 | **18,345** | 2.3ms | 7.6ms | 100% |
+| direct (1 backend) | 300 | 36,158 | 6.3ms | 30.9ms | 100% |
+| nginx | 300 | 22,178 | 10.2ms | 51.0ms | 100% |
+| **gateway** | 300 | **18,513** | 14.4ms | 42.1ms | 100% |
+
+The gateway reaches roughly **83–88% of nginx's throughput**. At concurrency 300 its p99 (42ms) is lower than nginx's (51ms). Before the buffer-pool fix described below, it reached only 60–65%: 14,244 req/s at concurrency 50 and 13,366 req/s at 300.
+
+How it was run (`./scripts/bench-nginx.sh`):
+- Everything runs natively on one 12-core machine (WSL2, Arch Linux), with each group pinned to its own 4 cores via `taskset`: `hey` on 0–3, the proxy under test on 4–7, and the backends on 8–11.
+- nginx runs 4 workers, and the gateway runs with `GOMAXPROCS=4`, so both get the same CPU budget.
+- Each row is the median of 3 runs of 100,000 requests, after a 5,000-request warmup.
+
+It isn't fully like-for-like:
+- **Only the gateway validates the JWT.** Open-source nginx can't validate JWTs (that's an NGINX Plus feature). Both receive the same `Authorization` header, so requests are the same size, but the gateway parses and HMAC-verifies a token on every request.
+- **The gateway does more logging.** It writes two log lines per request (`LoggingMiddleware` and `ModifyResponse`) through Go's mutex-guarded `log` package. nginx writes one access-log line.
+- **Results at concurrency 300 are noisier.** Even the direct baseline ranged from 33k to 41k req/s across its three runs.
+
+These numbers aren't comparable with the load-test table above: those runs were on Windows, used `go run` builds and didn't pin CPUs.
+
+### Profiling: the 32KB buffer per response
+
+The gateway can serve `net/http/pprof` on a separate port by setting `PPROF_ADDR=127.0.0.1:6060`. Profiling a 40-second load at concurrency 50 showed where the gateway's CPU and memory went:
+
+| | Before | After `BufferPool` |
+|---|---|---|
+| Throughput under the profiler | 13.6k req/s | 19.1k req/s |
+| Memory allocated per request | ~40 KB | ~9 KB |
+| CPU spent on garbage collection | ~11% | ~3% |
+
+By default, `httputil.ReverseProxy` allocates a fresh 32KB buffer for every response it copies. That one allocation accounted for **77% of all bytes allocated**, and the garbage collector had to clean up after it. Setting the proxy's `BufferPool` to a `sync.Pool`-backed pool, so buffers are reused instead of reallocated, took throughput from about 14k to 18.5k req/s with a one-line hookup.
+
+What's left in the profile, as a share of the gateway's CPU time:
+- **Socket reads and writes:** ~30%. These are system calls, and nginx makes them too.
+- **JWT validation:** ~10%. Most of that is `encoding/json` decoding the token's header and claims.
+- **Logging:** ~6%. Two formatted log lines and a `write` system call per request.
+- **The round-robin balancer:** under 0.5%. Its lock never showed up as contention.
+
 ### The connection pool bug
 
 Early load tests above ~500 concurrent connections failed hard with:
@@ -83,6 +128,7 @@ api/               — HTTP handlers (register, login, home)
 store/            — PostgreSQL data access (sqlc-generated)
 tests/            — integration tests (auth flow, round-robin, health-check failover)
 scripts/          — dev environment + load testing scripts
+bench/            — nginx config for the comparison benchmark
 ```
 
 ## Running locally
@@ -95,6 +141,7 @@ Requires Go, PostgreSQL, and [`hey`](https://github.com/rakyll/hey) (for load te
 ./scripts/load-test.sh                        # 2,000 requests, concurrency 50
 ./scripts/load-test.sh 100000 300             # custom request count / concurrency
 ./scripts/load-test.sh --duration 30s 50      # fixed time window (for failover testing)
+./scripts/bench-nginx.sh                      # gateway vs nginx vs direct (needs nginx, 12 cores)
 ```
 
 To test failover: start a duration-based load test, then kill one dummy backend process mid-run (`taskkill //PID <pid> //F` on Windows, `kill <pid>` on Unix) and watch the gateway's logs show a bounded burst of `502`s before health checks route around it.

@@ -24,19 +24,20 @@ The auth middleware adds `X-User-Id` and `X-Internal-Secret` (= `PROXY_SECRET`) 
 
 | Path | Purpose |
 |---|---|
-| `cmd/gateway` | Main entrypoint. Loads config, opens DB pool, builds router with 5s health-check interval. |
+| `cmd/gateway` | Main entrypoint. Loads config, opens DB pool, builds router with 5s health-check interval. Set `PPROF_ADDR` (e.g. `127.0.0.1:6060`) to serve `net/http/pprof` on a separate port. |
 | `cmd/dummybackend` | Stand-in backend for local load testing (`-port`, `-name`). Serves `/health` and `/secret` only (no catch-all, so path-stripping bugs surface as 404). |
 | `cmd/backend` | Older standalone backend on `127.0.0.1:8081` that checks `X-Internal-Secret`; uses `secret/`. Not wired into config or scripts. |
 | `config/` | `LoadEnv()` (walks up from cwd to find `.env`, `log.Fatal` if none) and `ImportServerConfig()` (reads YAML at `$SERVER_CONFIG`). |
 | `proxy/router.go` | `NewRouter(pool, serverConfig, env, healthCheckInterval)` — wires everything. Only the `"secret"` backend pool is used. |
 | `proxy/balancer.go` | `Balancer` interface, `RoundRobinBalancer` (atomic counter + `RWMutex` health state), `StartHealthChecks` (GETs `<url>/health`, 2s timeout, goroutine runs forever). If all backends are unhealthy, `Next()` still returns one. |
-| `proxy/proxy.go` | `NewReverseProxy` using the `Rewrite` hook (not `Director`) and a package-level `sharedTransport` with raised per-host conn limits — see README "connection pool bug" before touching it. 502 on proxy error. |
+| `proxy/proxy.go` | `NewReverseProxy` using the `Rewrite` hook (not `Director`), a package-level `sharedTransport` with raised per-host conn limits (see README "connection pool bug"), and `sharedBufferPool` (`sync.Pool` of 32KB copy buffers; removing it costs ~25% throughput, see README "Profiling"). 502 on proxy error. |
 | `auth/` | HS256 JWT generate/validate (24h expiry), Bearer extraction, middleware. |
 | `api/` | HTTP handlers: home, register (bcrypt via store), login (returns `{token, expires_in}`). |
 | `store/` | Thin wrapper over sqlc `Queries`; handles password hashing/compare. |
 | `db/` | `pool.go` (`PostgreSQLConnectionPoll`), `schema.sql`, `queries.sql`, `generated/` (sqlc output). |
 | `tests/` | Integration tests (package `tests`) — need a live Postgres. |
-| `scripts/` | `dev-up.sh` (3 dummy backends on 9001–9003 + gateway), `get-token.sh`, `load-test.sh` (uses `hey`). |
+| `scripts/` | `dev-up.sh` (3 dummy backends on 9001–9003 + gateway), `get-token.sh`, `load-test.sh` (uses `hey`), `bench-nginx.sh` (gateway vs nginx vs direct, CPU-pinned; needs nginx + 12 cores). |
+| `bench/nginx.conf` | Unprivileged nginx config mirroring the gateway's `/protected/*` proxying (listens on 8090), used by `bench-nginx.sh`. |
 | `bin/create_psql.py` | Creates the `reverseproxy` DB + `users` table locally (psycopg2, hardcoded creds). |
 
 `pkg/` is empty and `package-lock.json` is a stray empty npm lockfile.
