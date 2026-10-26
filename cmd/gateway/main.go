@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	_ "net/http/pprof"
+	"os"
 	"strconv"
 	"time"
 
@@ -16,6 +18,15 @@ func main() {
 	serverConfig := config.ImportServerConfig()
 	env := config.LoadEnv()
 	pool := db.PostgreSQLConnectionPoll(env.DatabaseURL)
+
+	// pprof registers on http.DefaultServeMux, which the gateway's own
+	// router doesn't use, so profiles are only reachable on this port
+	if addr := os.Getenv("PPROF_ADDR"); addr != "" {
+		go func() {
+			log.Printf("pprof listening on %s", addr)
+			log.Println(http.ListenAndServe(addr, nil))
+		}()
+	}
 
 	fmt.Println("Gateway starting")
 	defer pool.Close()
