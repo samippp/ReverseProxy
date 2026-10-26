@@ -4,6 +4,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -72,19 +73,28 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 
 	if err := json.NewDecoder(r.Body).Decode(&loginUser); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
+	defer r.Body.Close()
 
 	context, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 	user, err := h.store.Login(context, loginUser.Username, loginUser.Password)
-	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
+	if errors.Is(err, store.ErrInvalidCredentials) {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
 	}
-	defer r.Body.Close()
+	if err != nil {
+		log.Printf("login failed for user=%s: %v", loginUser.Username, err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
 
 	token, expiresIn, err := auth.GenerateToken(user.ID, user.Username, h.envConfig.JwtSecret)
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("failed to generate token for user=%s: %v", user.Username, err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -99,7 +109,6 @@ func writeUser(w http.ResponseWriter, user generated.User) error {
 	return json.NewEncoder(w).Encode(map[string]any{
 		"id":         user.ID,
 		"username":   user.Username,
-		"password":   user.Password,
 		"email":      user.Email,
 		"created_at": user.CreatedAt.Time,
 	})

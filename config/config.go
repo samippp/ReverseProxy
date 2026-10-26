@@ -45,8 +45,14 @@ func LoadEnv() *EnvConfig {
 		path := filepath.Join(dir, ".env")
 		if _, err := os.Stat(path); err == nil {
 			godotenv.Load(path)
+			// a relative SERVER_CONFIG is resolved against the .env's
+			// directory, so the same .env works from any cwd and OS
+			serverConfig := os.Getenv("SERVER_CONFIG")
+			if serverConfig != "" && !filepath.IsAbs(serverConfig) {
+				serverConfig = filepath.Join(dir, serverConfig)
+			}
 			return &EnvConfig{
-				ServerConfig: os.Getenv("SERVER_CONFIG"),
+				ServerConfig: serverConfig,
 				DatabaseURL:  os.Getenv("DATABASE_URL"),
 				JwtSecret:    os.Getenv("JWT_SECRET"),
 				ProxySecret:  os.Getenv("PROXY_SECRET"),
@@ -61,8 +67,7 @@ func LoadEnv() *EnvConfig {
 }
 
 func ImportServerConfig() ServerConfig {
-	LoadEnv()
-	serverConfigPath := os.Getenv("SERVER_CONFIG")
+	serverConfigPath := LoadEnv().ServerConfig
 	yamlFile, err := os.ReadFile(serverConfigPath)
 	if err != nil {
 		log.Fatal("Cannot read serverConfig file, {}", err)
