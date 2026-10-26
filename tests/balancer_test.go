@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,8 +43,9 @@ func TestRoundRobinBalancer_SkipsUnhealthyBackend(t *testing.T) {
 	balancer.StartHealthChecks(50 * time.Millisecond)
 	backend1.Close()
 
-	// Wait past several check intervals so the balancer notices
-	time.Sleep(250 * time.Millisecond)
+	// Wait past several check intervals: it takes 3 consecutive
+	// failed checks before a backend leaves rotation
+	time.Sleep(400 * time.Millisecond)
 
 	// Now backend1 should never be returned
 	seenAfter := map[string]int{}
@@ -119,5 +121,80 @@ func TestProtectedSecret_RoundRobin_DistributesAcrossBackends(t *testing.T) {
 		if count != numRequests/3 {
 			t.Errorf("expected backend %s to receive exactly %d requests, got %d", backendID, numRequests/3, count)
 		}
+	}
+}
+
+// deadAndAliveBackends returns the URL of a closed server (connections
+// are refused) and a live server that answers 200 with its name.
+func deadAndAliveBackends(t *testing.T) (deadURL string, alive *httptest.Server) {
+	t.Helper()
+	dead := httptest.NewServer(http.NotFoundHandler())
+	deadURL = dead.URL
+	dead.Close()
+	alive = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("alive"))
+	}))
+	t.Cleanup(alive.Close)
+	return deadURL, alive
+}
+
+func TestReverseProxy_RetriesGetOnDeadBackend(t *testing.T) {
+	t.Log("-----------------------Test Retry GET On Dead Backend--------------------")
+
+	deadURL, alive := deadAndAliveBackends(t)
+	balancer := proxy.NewRoundRobinBalancer([]config.Backend{
+		{Name: "dead", URL: deadURL},
+		{Name: "alive", URL: alive.URL},
+	})
+	front := httptest.NewServer(proxy.NewReverseProxy(balancer, ""))
+	defer front.Close()
+
+	// no active health checks: every request that lands on the dead
+	// backend must be rescued by a retry, and the failures alone must
+	// take it out of rotation
+	for i := range 10 {
+		resp, err := http.Get(front.URL + "/secret")
+		if err != nil {
+			t.Fatalf("request %d failed: %v", i, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("request %d: expected 200 via retry, got %d", i, resp.StatusCode)
+		}
+	}
+
+	for range 10 {
+		if got := balancer.Next(); got.URL == deadURL {
+			t.Fatal("dead backend still in rotation after repeated failed requests")
+		}
+	}
+}
+
+func TestReverseProxy_DoesNotRetryPost(t *testing.T) {
+	t.Log("-----------------------Test No Retry For POST--------------------")
+
+	deadURL, alive := deadAndAliveBackends(t)
+	balancer := proxy.NewRoundRobinBalancer([]config.Backend{
+		{Name: "dead", URL: deadURL},
+		{Name: "alive", URL: alive.URL},
+	})
+	front := httptest.NewServer(proxy.NewReverseProxy(balancer, ""))
+	defer front.Close()
+
+	// round robin alternates, so some of these land on the dead backend;
+	// a POST may not be safe to repeat, so those must surface as 502
+	badGateways := 0
+	for i := range 4 {
+		resp, err := http.Post(front.URL+"/orders", "application/json", strings.NewReader(`{"n":1}`))
+		if err != nil {
+			t.Fatalf("request %d failed: %v", i, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusBadGateway {
+			badGateways++
+		}
+	}
+	if badGateways == 0 {
+		t.Error("expected POSTs routed to the dead backend to return 502, not be retried")
 	}
 }

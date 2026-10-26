@@ -1,6 +1,6 @@
 # ReverseProxy
 
-A Go-based API gateway with JWT authentication, round-robin load balancing, active health checks, and connection pooling — built and load-tested from scratch to understand how production reverse proxies actually work.
+A Go-based API gateway with JWT authentication, round-robin load balancing, active and passive health checks with retries, and connection pooling — built and load-tested from scratch to understand how production reverse proxies actually work.
 
 ```
 Client → [Gateway :8080] → JWT auth → Load balancer → Backend replica (1 of N)
@@ -12,7 +12,9 @@ Client → [Gateway :8080] → JWT auth → Load balancer → Backend replica (1
 
 - **JWT authentication** (HS256) protecting `/protected/*` routes
 - **Round-robin load balancing** across a configurable pool of backend replicas
-- **Active health checks** — a background goroutine pings each backend on an interval, marking unhealthy backends unavailable and automatically routing around them
+- **Active health checks:** a background goroutine pings each backend's `/health` endpoint on an interval and routes around backends that fail.
+- **Passive health checks and retries:** a failed proxied request counts against its backend immediately, without waiting for the next check. Safe-to-repeat requests (GET, HEAD, OPTIONS without a body) are retried on a different backend, so clients don't see the failure.
+- **Flap protection:** a backend leaves rotation only after 3 consecutive failures, and returns only after 2 consecutive passing checks.
 - **Path stripping** — the gateway's public routes are decoupled from backend-internal routes (`/protected/secret` → backend sees `/secret`)
 - **HTTP connection pooling** — reuses TCP connections to backends instead of opening a new one per request
 - **PostgreSQL persistence** via `pgxpool`, with `sqlc`-generated type-safe queries
@@ -23,13 +25,15 @@ Client → [Gateway :8080] → JWT auth → Load balancer → Backend replica (1
 Requests flow through the gateway as follows:
 
 1. **Auth middleware** validates the JWT on `/protected/*` routes, rejecting unauthenticated requests with `401` before they reach the proxy layer
-2. **Load balancer** (`RoundRobinBalancer`) selects a healthy backend from the configured pool, using an atomic counter for the rotation and a `sync.RWMutex` to guard health state, since `Next()` is called concurrently by every in-flight request while a background goroutine occasionally updates health status
+2. **Load balancer** (`RoundRobinBalancer`) picks the next backend from an immutable list of the healthy ones, using an atomic counter for the rotation. `Next()` is called by every in-flight request, so it never takes a lock. When a backend's health changes, the balancer builds a new list and swaps it in atomically.
 3. **Reverse proxy** rewrites the outbound request (via `httputil.ReverseProxy`'s `Rewrite` hook — the modern replacement for the deprecated `Director` field) to point at the selected backend, stripping the gateway-facing path prefix
-4. **Health checker** runs on a separate goroutine, pinging every backend's `/health` endpoint on a fixed interval and updating shared health state under a write lock
+4. **Health tracking** combines two signals: a background goroutine pinging every backend's `/health` endpoint, and failures reported by proxied requests. A backend is removed after 3 consecutive failures from either source, and re-added after 2 consecutive passing checks.
+5. **Retries:** when a request fails to reach a backend (connection refused, reset or timed out), the proxy retries it on a backend it hasn't tried yet, up to 3 attempts. This only applies to GET, HEAD and OPTIONS requests without a body. A POST might not be safe to send twice, so it fails with a 502. A backend that answers, even with a 5xx error, isn't retried.
 
 ```go
 type Balancer interface {
     Next() config.Backend
+    ReportFailure(target *url.URL)
 }
 ```
 
@@ -45,7 +49,21 @@ Tested locally with [`hey`](https://github.com/rakyll/hey) against 3 backend rep
 | Sustained volume | 100,000 | 300 | 34,217 | 7.2ms | 25.4ms | 100% |
 | Failover (live kill) | ~758,000 (30s) | 50 | 25,278 | 1.7ms | 8.4ms | 97.8%* |
 
-*\*Failover test: one backend was killed mid-run. Failures were bounded to a ~2-second window immediately following the kill — the time it took the health checker to detect the dead backend and stop routing to it. The remaining ~28 seconds of the 30-second test ran at 100% success across the two surviving backends, with zero manual intervention.*
+*\*Failover test: one backend was killed mid-run. Failures were bounded to a ~2-second window immediately following the kill — the time it took the health checker to detect the dead backend and stop routing to it. The remaining ~28 seconds of the 30-second test ran at 100% success across the two surviving backends, with zero manual intervention. These figures predate passive health checks and retries; see below.*
+
+### Failover with passive health checks and retries
+
+The same failover test was re-run with the newer code, CPU-pinned like the nginx comparison. It's a 30-second load at concurrency 50, with backend-2 killed (`kill -9`) at 8 seconds and restarted at 18:
+
+| | Active checks only | + Passive checks and retries |
+|---|---|---|
+| Responses | 339,857 | 600,425 |
+| 502 errors | 8,147 (2.4%) | **0** |
+| Retries | — | 27 |
+
+With retries, the first few requests to hit the dead backend were sent on to a surviving one. After 3 failures, the backend was out of rotation within milliseconds of the kill instead of at the next 5-second health check. When it restarted, it rejoined after 2 consecutive passing checks.
+
+The throughput gap only appears during the failover run, and its cause hasn't been investigated: under normal load, both builds handle about 20k req/s.
 
 ### Comparison with nginx
 
@@ -144,7 +162,7 @@ Requires Go, PostgreSQL, and [`hey`](https://github.com/rakyll/hey) (for load te
 ./scripts/bench-nginx.sh                      # gateway vs nginx vs direct (needs nginx, 12 cores)
 ```
 
-To test failover: start a duration-based load test, then kill one dummy backend process mid-run (`taskkill //PID <pid> //F` on Windows, `kill <pid>` on Unix) and watch the gateway's logs show a bounded burst of `502`s before health checks route around it.
+To test failover: start a duration-based load test, then kill one dummy backend process mid-run (`taskkill //PID <pid> //F` on Windows, `kill <pid>` on Unix) and watch the gateway's logs. The dead backend should be `removed from rotation` after a few retries, without any `502`s, and come `back in rotation` after you restart it.
 
 ## Testing
 
@@ -152,4 +170,4 @@ To test failover: start a duration-based load test, then kill one dummy backend 
 go test ./...
 ```
 
-Covers: registration/login, protected-route auth (401/200 paths), round-robin distribution across backends, and health-check-driven failover (verified by closing a test backend mid-suite and confirming the balancer stops routing to it).
+Covers: registration/login, protected-route auth (401/200 paths), round-robin distribution across backends, health-check-driven failover (verified by closing a test backend mid-suite and confirming the balancer stops routing to it), retries of GET requests that hit a dead backend (and no retries for POST), and the fall/rise thresholds that stop flapping.
