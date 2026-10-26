@@ -1,12 +1,15 @@
 package tests // Change return type from auth.Claims to *auth.Claimpackage tests
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"testing"
 	"time"
 
+	"github.com/samippp/ReverseProxy/api"
 	"github.com/samippp/ReverseProxy/config"
 )
 
@@ -57,4 +60,35 @@ func TestLoginWithServer(t *testing.T) {
 	// Reusable login call + token validation
 	claims, _ := performLoginAndValidateToken(t, payload)
 	t.Log(claims)
+}
+
+func TestLoginWithServer_WrongPassword_Returns401(t *testing.T) {
+	t.Log("------------------Login Wrong Password-----------------")
+
+	_, regResp := createTestUser(t, "Mallory", "meow", "mallory@gmail.com")
+	if err := regResp.Body.Close(); err != nil {
+		t.Logf("Warning: failed to close setup response body: %v", err)
+	}
+
+	payload, err := json.Marshal(api.CreateUserRequest{Username: "Mallory", Password: "wrong"})
+	if err != nil {
+		t.Fatalf("failed to marshal login payload: %v", err)
+	}
+	resp, err := http.Post(testServer.URL+"/login", "application/json", bytes.NewBuffer(payload))
+	if err != nil {
+		t.Fatalf("HTTP POST /login failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", resp.StatusCode)
+	}
+	if bytes.Contains(body, []byte("token")) {
+		t.Errorf("expected no token in response body, got: %s", body)
+	}
 }

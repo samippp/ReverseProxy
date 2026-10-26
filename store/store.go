@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"errors"
 	"log"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	db "github.com/samippp/ReverseProxy/db/generated"
 	"golang.org/x/crypto/bcrypt"
@@ -38,14 +40,28 @@ func (s *Store) RegisterUser(context context.Context, username, password, email 
 	return user, nil
 }
 
+// ErrInvalidCredentials is returned by Login when the username doesn't
+// exist or the password doesn't match, so callers can tell a bad login
+// apart from a database failure.
+var ErrInvalidCredentials = errors.New("invalid username or password")
+
 func (s *Store) Login(context context.Context, username, password string) (db.User, error) {
 	queriedUser, err := s.GetUserByUsername(context, username)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return db.User{}, ErrInvalidCredentials
+	}
 	if err != nil {
 		return db.User{}, err
 	}
 	// compare password for auth
-	error := bcrypt.CompareHashAndPassword([]byte(queriedUser.Password), []byte(password))
-	return queriedUser, error
+	err = bcrypt.CompareHashAndPassword([]byte(queriedUser.Password), []byte(password))
+	if errors.Is(err, bcrypt.ErrMismatchedHashAndPassword) {
+		return db.User{}, ErrInvalidCredentials
+	}
+	if err != nil {
+		return db.User{}, err
+	}
+	return queriedUser, nil
 }
 
 func (s *Store) GetUserByUsername(ctx context.Context, username string) (db.User, error) {
