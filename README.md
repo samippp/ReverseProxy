@@ -15,6 +15,7 @@ Client → [Gateway :8080] → JWT auth → Load balancer → Backend replica (1
 - **Active health checks:** a background goroutine pings each backend's `/health` endpoint on an interval and routes around backends that fail.
 - **Passive health checks and retries:** a failed proxied request counts against its backend immediately, without waiting for the next check. Safe-to-repeat requests (GET, HEAD, OPTIONS without a body) are retried on a different backend, so clients don't see the failure.
 - **Flap protection:** a backend leaves rotation only after 3 consecutive failures, and returns only after 2 consecutive passing checks.
+- **Ejection backoff:** a removed backend stays out for at least 10s. If it fails again within a minute of returning, it stays out twice as long the next time, up to 5 minutes. This stops a backend whose `/health` passes while its real requests hang from cycling back into rotation every few seconds.
 - **Path stripping** — the gateway's public routes are decoupled from backend-internal routes (`/protected/secret` → backend sees `/secret`)
 - **HTTP connection pooling** — reuses TCP connections to backends instead of opening a new one per request
 - **PostgreSQL persistence** via `pgxpool`, with `sqlc`-generated type-safe queries
@@ -27,7 +28,7 @@ Requests flow through the gateway as follows:
 1. **Auth middleware** validates the JWT on `/protected/*` routes, rejecting unauthenticated requests with `401` before they reach the proxy layer
 2. **Load balancer** (`RoundRobinBalancer`) picks the next backend from an immutable list of the healthy ones, using an atomic counter for the rotation. `Next()` is called by every in-flight request, so it never takes a lock. When a backend's health changes, the balancer builds a new list and swaps it in atomically.
 3. **Reverse proxy** rewrites the outbound request (via `httputil.ReverseProxy`'s `Rewrite` hook — the modern replacement for the deprecated `Director` field) to point at the selected backend, stripping the gateway-facing path prefix
-4. **Health tracking** combines two signals: a background goroutine pinging every backend's `/health` endpoint, and failures reported by proxied requests. A backend is removed after 3 consecutive failures from either source, and re-added after 2 consecutive passing checks.
+4. **Health tracking** combines two signals: a background goroutine pinging every backend's `/health` endpoint, and failures reported by proxied requests. A backend is removed after 3 consecutive failures from either source, and re-added after 2 consecutive passing checks once its ejection period is over. That period starts at 10s and doubles each time the backend fails again soon after returning, up to 5 minutes.
 5. **Retries:** when a request fails to reach a backend (connection refused, reset or timed out), the proxy retries it on a backend it hasn't tried yet, up to 3 attempts. This only applies to GET, HEAD and OPTIONS requests without a body. A POST might not be safe to send twice, so it fails with a 502. A backend that answers, even with a 5xx error, isn't retried.
 
 ```go
