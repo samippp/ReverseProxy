@@ -2,7 +2,10 @@ package tests
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"github.com/samippp/ReverseProxy/auth"
 )
 
 func TestProtectedSecret_NoToken_Returns401(t *testing.T) {
@@ -53,5 +56,28 @@ func TestProtectedSecret_ValidToken_Returns200(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestAuthMiddleware_SetsUserIdHeader(t *testing.T) {
+	t.Log("---------------------Test X-User-Id Header--------------------")
+
+	var gotUserID string
+	backend := auth.HandleAuthMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUserID = r.Header.Get("X-User-Id")
+	}), "proxy-secret")
+
+	token, _, err := auth.GenerateToken(42, "alice", "")
+	if err != nil {
+		t.Fatalf("failed to generate token: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/protected/secret", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	// a client-supplied header must not survive to the backend
+	req.Header.Set("X-User-Id", "1")
+	backend.ServeHTTP(httptest.NewRecorder(), req)
+
+	if gotUserID != "42" {
+		t.Errorf("expected X-User-Id 42, got %q", gotUserID)
 	}
 }

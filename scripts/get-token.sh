@@ -9,13 +9,13 @@ PASSWORD="loadtest123"
 EMAIL="loadtest@example.com"
 
 echo "registering user (ignore error if already exists)..." >&2
-curl -s -X POST "$GATEWAY_URL/register" \
+curl -s -m 5 -X POST "$GATEWAY_URL/register" \
   -H "Content-Type: application/json" \
   -d "{\"username\":\"$USERNAME\",\"password\":\"$PASSWORD\",\"email\":\"$EMAIL\"}" \
   >/dev/null || true
 
 echo "logging in..." >&2
-LOGIN_RESPONSE=$(curl -s -X POST "$GATEWAY_URL/login" \
+LOGIN_RESPONSE=$(curl -s -m 5 -X POST "$GATEWAY_URL/login" \
   -H "Content-Type: application/json" \
   -d "{\"username\":\"$USERNAME\",\"password\":\"$PASSWORD\"}")
 
@@ -30,7 +30,9 @@ fi
 echo "token acquired." >&2
 echo "" >&2
 echo "sanity check:" >&2
-curl -s -H "Authorization: Bearer $TOKEN" "$GATEWAY_URL/protected/secret" >&2
+# bounded and non-fatal, so a stuck backend can't hang or abort token fetching
+curl -s -m 5 -H "Authorization: Bearer $TOKEN" "$GATEWAY_URL/protected/secret" >&2 \
+  || echo "(sanity check failed; token is still valid)" >&2
 echo "" >&2
 echo "" >&2
 

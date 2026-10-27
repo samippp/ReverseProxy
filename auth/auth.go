@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -77,7 +78,7 @@ func HandleAuthMiddleware(h http.Handler, proxySecret string) http.Handler {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return // proxy never runs
 		}
-		r.Header.Set("X-User-Id", claims.Subject)
+		r.Header.Set("X-User-Id", strconv.Itoa(int(claims.UserID)))
 		r.Header.Set("X-Internal-Secret", proxySecret)
 		h.ServeHTTP(w, r) // now hits proxy.ServeHTTP
 	})

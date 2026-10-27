@@ -2,7 +2,9 @@
 package proxy
 
 import (
+	"errors"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -17,12 +19,32 @@ import (
 // under concurrent load, connections to a backend are pooled and
 // reused instead of being torn down and recreated for every request —
 // avoiding rapid ephemeral port churn (and exhaustion) under load.
+//
+// The timeouts turn a backend that black-holes connections or never
+// answers into a transport error, which retryTransport reports and
+// retries. Without them a request waits until the client gives up,
+// which doesn't count against the backend, so it stays in rotation.
+//
+// MaxIdleConns is left at 0 (no global cap): a global cap below
+// backends × MaxIdleConnsPerHost closes the excess pooled connections
+// after every burst, only for them to be redialed on the next one.
 var sharedTransport = &http.Transport{
-	MaxIdleConns:        200,
-	MaxIdleConnsPerHost: 100,
-	MaxConnsPerHost:     100,
-	IdleConnTimeout:     90 * time.Second,
+	DialContext: (&net.Dialer{
+		Timeout:   dialTimeout,
+		KeepAlive: 30 * time.Second,
+	}).DialContext,
+	ResponseHeaderTimeout: responseHeaderTimeout,
+	MaxIdleConnsPerHost:   100,
+	MaxConnsPerHost:       100,
+	IdleConnTimeout:       90 * time.Second,
 }
+
+const (
+	dialTimeout = 2 * time.Second
+	// responseHeaderTimeout should stay below clients' own timeouts, so
+	// a retry on another backend can still answer in time.
+	responseHeaderTimeout = 5 * time.Second
+)
 
 // sharedBufferPool recycles the 32KB buffers ReverseProxy copies
 // response bodies through. Without it, every proxied response allocates
@@ -52,8 +74,9 @@ func (p *bufferPool) Put(b []byte) {
 // retryTransport reports failed round trips to the balancer, so dead
 // backends leave rotation without waiting for a health check, and
 // retries idempotent, bodiless requests on a backend not yet tried.
-// Only transport errors (refused, reset, timed out) count; a backend
-// that answers, even with a 5xx, has responded and isn't retried.
+// Only transport errors (refused, reset, dial or response-header
+// timeout) count; a backend that answers, even with a 5xx, has
+// responded and isn't retried.
 type retryTransport struct {
 	next        http.RoundTripper
 	balancer    Balancer
@@ -64,6 +87,9 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	tried := []string{backendKey(req.URL)}
 	for {
 		resp, err := t.next.RoundTrip(req)
+		if err != nil {
+			err = &backendError{host: req.URL.Host, err: err}
+		}
 		// a canceled context means the client went away, not the backend
 		if err == nil || req.Context().Err() != nil {
 			return resp, err
@@ -82,6 +108,16 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		tried = append(tried, backendKey(target))
 	}
 }
+
+// backendError records which backend a failed attempt went to. After a
+// retry that differs from the request ReverseProxy passes to ErrorHandler.
+type backendError struct {
+	host string
+	err  error
+}
+
+func (e *backendError) Error() string { return e.err.Error() }
+func (e *backendError) Unwrap() error { return e.err }
 
 // untriedBackend asks the balancer for a backend not in tried. The
 // search is bounded because the balancer may only have tried ones left.
@@ -132,8 +168,13 @@ func NewReverseProxy(balancer Balancer, stripPrefix string) *httputil.ReversePro
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			backend := r.URL.Host
+			var be *backendError
+			if errors.As(err, &be) {
+				backend = be.host
+			}
 			log.Printf("proxy error backend=%s path=%s err=%v",
-				r.URL.Host, r.URL.Path, err)
+				backend, r.URL.Path, err)
 			w.WriteHeader(http.StatusBadGateway)
 		},
 	}
