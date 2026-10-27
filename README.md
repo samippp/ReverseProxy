@@ -128,10 +128,9 @@ var sharedTransport = &http.Transport{
         Timeout:   2 * time.Second,
         KeepAlive: 30 * time.Second,
     }).DialContext,
-    ResponseHeaderTimeout: 5 * time.Second,
-    MaxIdleConnsPerHost:   100,
-    MaxConnsPerHost:       100,
-    IdleConnTimeout:       90 * time.Second,
+    MaxIdleConnsPerHost: 100,
+    MaxConnsPerHost:     100,
+    IdleConnTimeout:     90 * time.Second,
 }
 ```
 
@@ -139,7 +138,9 @@ var sharedTransport = &http.Transport{
 
 Two later changes:
 - **No global idle cap.** The transport originally also set `MaxIdleConns: 200`. That was below 3 backends × 100, so after every burst the transport closed 100 pooled connections, only to open them again on the next burst. Leaving `MaxIdleConns` at 0 means there's no global cap, and `MaxIdleConnsPerHost` still caps each backend at 100 idle connections.
-- **Timeouts.** Stress testing showed that without them, a backend that never answers, or one whose network silently drops connection attempts, makes requests hang until the client gives up. Those requests don't count against the backend, so it stays in rotation. With a 2s connect timeout and a 5s wait for the response to start, the failure becomes an error that removes the backend and triggers a retry.
+- **Timeouts.** Stress testing showed that without them, a backend that never answers, or one whose network silently drops connection attempts, makes requests hang until the client gives up. Those requests don't count against the backend, so it stays in rotation. Now the transport gives up on connecting after 2s, and the retry layer gives each attempt 5s to get a response started, with a 10s budget across all attempts. A timeout counts as a failure, which removes the backend and triggers a retry.
+
+  The 5s clock starts before the request has a connection, not when it's sent. An earlier version used the transport's `ResponseHeaderTimeout`, which only starts once a connection is in hand. When all 100 connections to a hung backend were stuck, new requests first waited up to 5s for one to free up, and only then started their own 5s clock. In a 30-second test with a hung backend and clients that give up at 10s, that caused 362 client timeouts. Timing the whole attempt brought it to 0, and the slowest request fell from 10.0s to 5.2s. The clock stops once the response headers arrive, so slow response bodies aren't cut off.
 
 ## Project structure
 
