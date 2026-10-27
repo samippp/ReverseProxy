@@ -120,18 +120,26 @@ dial tcp [::1]:9003: connectex: Only one usage of each socket address
 
 This is Windows' wording for **ephemeral port exhaustion**. `httputil.ReverseProxy` uses `http.DefaultTransport` unless configured otherwise, and `DefaultTransport`'s `MaxIdleConnsPerHost` defaults to `2` — meaning under concurrent load, only 2 connections per backend were ever reused; everything beyond that was opened fresh and torn down immediately after use. Each teardown leaves the connection's port in a `TIME_WAIT` state for ~120 seconds (on Windows), and under sustained high-concurrency traffic, new connections were being created faster than old ones could clear — exhausting the available ephemeral port range outright.
 
-**Fix:** a shared `http.Transport` with explicit connection limits:
+**Fix:** a shared `http.Transport` with explicit connection limits. This is its current form:
 
 ```go
 var sharedTransport = &http.Transport{
-    MaxIdleConns:        200,
-    MaxIdleConnsPerHost: 100,
-    MaxConnsPerHost:     100,
-    IdleConnTimeout:     90 * time.Second,
+    DialContext: (&net.Dialer{
+        Timeout:   2 * time.Second,
+        KeepAlive: 30 * time.Second,
+    }).DialContext,
+    ResponseHeaderTimeout: 5 * time.Second,
+    MaxIdleConnsPerHost:   100,
+    MaxConnsPerHost:       100,
+    IdleConnTimeout:       90 * time.Second,
 }
 ```
 
 `MaxConnsPerHost` was the critical addition — `MaxIdleConnsPerHost` alone only bounds how many *idle* connections get reused; it does nothing to cap how many can be opened *concurrently* in the first place. With both set, connections to each backend are capped and reused rather than churned, and load tests up to 300 concurrent connections / 100,000 requests ran without a single connection-related failure afterward.
+
+Two later changes:
+- **No global idle cap.** The transport originally also set `MaxIdleConns: 200`. That was below 3 backends × 100, so after every burst the transport closed 100 pooled connections, only to open them again on the next burst. Leaving `MaxIdleConns` at 0 means there's no global cap, and `MaxIdleConnsPerHost` still caps each backend at 100 idle connections.
+- **Timeouts.** Stress testing showed that without them, a backend that never answers, or one whose network silently drops connection attempts, makes requests hang until the client gives up. Those requests don't count against the backend, so it stays in rotation. With a 2s connect timeout and a 5s wait for the response to start, the failure becomes an error that removes the backend and triggers a retry.
 
 ## Project structure
 
