@@ -2,6 +2,7 @@
 package proxy
 
 import (
+	"errors"
 	"log"
 	"net"
 	"net/http"
@@ -23,13 +24,16 @@ import (
 // answers into a transport error, which retryTransport reports and
 // retries. Without them a request waits until the client gives up,
 // which doesn't count against the backend, so it stays in rotation.
+//
+// MaxIdleConns is left at 0 (no global cap): a global cap below
+// backends × MaxIdleConnsPerHost closes the excess pooled connections
+// after every burst, only for them to be redialed on the next one.
 var sharedTransport = &http.Transport{
 	DialContext: (&net.Dialer{
 		Timeout:   dialTimeout,
 		KeepAlive: 30 * time.Second,
 	}).DialContext,
 	ResponseHeaderTimeout: responseHeaderTimeout,
-	MaxIdleConns:          200,
 	MaxIdleConnsPerHost:   100,
 	MaxConnsPerHost:       100,
 	IdleConnTimeout:       90 * time.Second,
@@ -83,6 +87,9 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	tried := []string{backendKey(req.URL)}
 	for {
 		resp, err := t.next.RoundTrip(req)
+		if err != nil {
+			err = &backendError{host: req.URL.Host, err: err}
+		}
 		// a canceled context means the client went away, not the backend
 		if err == nil || req.Context().Err() != nil {
 			return resp, err
@@ -101,6 +108,16 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		tried = append(tried, backendKey(target))
 	}
 }
+
+// backendError records which backend a failed attempt went to. After a
+// retry that differs from the request ReverseProxy passes to ErrorHandler.
+type backendError struct {
+	host string
+	err  error
+}
+
+func (e *backendError) Error() string { return e.err.Error() }
+func (e *backendError) Unwrap() error { return e.err }
 
 // untriedBackend asks the balancer for a backend not in tried. The
 // search is bounded because the balancer may only have tried ones left.
@@ -151,8 +168,13 @@ func NewReverseProxy(balancer Balancer, stripPrefix string) *httputil.ReversePro
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			backend := r.URL.Host
+			var be *backendError
+			if errors.As(err, &be) {
+				backend = be.host
+			}
 			log.Printf("proxy error backend=%s path=%s err=%v",
-				r.URL.Host, r.URL.Path, err)
+				backend, r.URL.Path, err)
 			w.WriteHeader(http.StatusBadGateway)
 		},
 	}

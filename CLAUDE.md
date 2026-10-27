@@ -18,7 +18,7 @@ Client → gateway (:8080, cmd/gateway)
 All routes wrapped in proxy.LoggingMiddleware.
 ```
 
-The auth middleware adds `X-User-Id` and `X-Internal-Secret` (= `PROXY_SECRET`) headers before proxying.
+The auth middleware adds `X-User-Id` (the JWT's `user_id` claim, overwriting any client-sent value) and `X-Internal-Secret` (= `PROXY_SECRET`) headers before proxying.
 
 ## Layout
 
@@ -90,7 +90,5 @@ CI (`.github/workflows/test.yml`): Postgres 16 service, gofmt check, `go vet`, a
 Worth knowing before changing related code (not yet fixed):
 
 - `auth.GenerateToken` ignores its `jwtSecret` param; both generate and validate read `os.Getenv("JWT_SECRET")` directly.
-- Middleware sets `X-User-Id` from `claims.Subject`, which is never populated (user ID lives in `claims.UserID`), so the header is empty.
 - `api.New` calls `config.LoadEnv()` itself rather than receiving the env from the router.
-- Several `log.Fatal`/`fmt.Println` calls use `{}` placeholders (Rust/Python style), which Go doesn't interpolate.
 - `api.SecretHandler` is an unused stub.

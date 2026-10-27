@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -45,5 +46,31 @@ func TestRetryTransport_RetriesAfterResponseHeaderTimeout(t *testing.T) {
 	}
 	if inRotation(balancer, hung.URL) {
 		t.Errorf("hung backend still in rotation after %d header timeouts", fallThreshold)
+	}
+}
+
+func TestRetryTransport_ErrorNamesLastBackendTried(t *testing.T) {
+	deadA := httptest.NewServer(http.NotFoundHandler())
+	deadA.Close()
+	deadB := httptest.NewServer(http.NotFoundHandler())
+	deadB.Close()
+
+	balancer := NewRoundRobinBalancer([]config.Backend{
+		{Name: "a", URL: deadA.URL},
+		{Name: "b", URL: deadB.URL},
+	})
+	rt := &retryTransport{next: &http.Transport{}, balancer: balancer, maxAttempts: 3}
+
+	// first attempt goes to a, the retry to b; the error must name b, not
+	// the backend the original request was addressed to
+	req := httptest.NewRequest(http.MethodGet, deadA.URL+"/secret", nil)
+	req.RequestURI = ""
+	_, err := rt.RoundTrip(req)
+	var be *backendError
+	if !errors.As(err, &be) {
+		t.Fatalf("expected a backendError, got %v", err)
+	}
+	if want := deadB.Listener.Addr().String(); be.host != want {
+		t.Errorf("error names backend %s, want %s", be.host, want)
 	}
 }

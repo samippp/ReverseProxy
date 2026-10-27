@@ -15,7 +15,7 @@ func PostgreSQLConnectionPoll(databaseURL string) *pgxpool.Pool {
 	defer cancel()
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
-		log.Fatal("Could not open pxgppool. Err: {}", err)
+		log.Fatalf("Could not open pgxpool: %v", err)
 	}
 	return pool
 }

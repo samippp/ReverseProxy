@@ -136,7 +136,7 @@ func (h *Handler) CheckUserExist(ctx context.Context, username string) (generate
 	defer cancel()
 	user, err := h.store.GetUserByUsername(ctx, username)
 	if err != nil {
-		fmt.Println("User not found {}", username)
+		log.Printf("user not found: %s", username)
 		return generated.User{}, err
 	}
 	return user, nil

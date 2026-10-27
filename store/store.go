@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"log"
 	"runtime"
 
@@ -69,7 +70,7 @@ func (s *Store) RegisterUser(context context.Context, username, password, email 
 		return db.User{}, slotErr
 	}
 	if err != nil {
-		log.Fatal("Cannot hash password: {}. {}", string(hashedPassword), err)
+		return db.User{}, fmt.Errorf("hash password: %w", err)
 	}
 	user, err := s.CreateUser(context, username, string(hashedPassword), email)
 	if err != nil {

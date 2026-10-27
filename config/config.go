@@ -70,11 +70,11 @@ func ImportServerConfig() ServerConfig {
 	serverConfigPath := LoadEnv().ServerConfig
 	yamlFile, err := os.ReadFile(serverConfigPath)
 	if err != nil {
-		log.Fatal("Cannot read serverConfig file, {}", err)
+		log.Fatalf("Cannot read serverConfig file: %v", err)
 	}
 	var config ServerConfig
 	if err := yaml.Unmarshal([]byte(yamlFile), &config); err != nil {
-		log.Fatal("Cannot parse yaml config")
+		log.Fatalf("Cannot parse yaml config: %v", err)
 	}
 	return config
 }
