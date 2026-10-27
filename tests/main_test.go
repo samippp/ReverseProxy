@@ -1,3 +1,4 @@
+// Package tests holds integration tests against a live Postgres.
 package tests
 
 import (
@@ -20,19 +21,20 @@ import (
 	"github.com/samippp/ReverseProxy/store"
 )
 
+// Shared by all tests; set up in TestMain.
 var (
 	testPool   *pgxpool.Pool
 	testStore  *store.Store
 	testServer *httptest.Server
 )
 
+// TestMain serves the real router, proxying to three test backends.
 func TestMain(m *testing.M) {
 	env := config.LoadEnv()
 	testPool = db.PostgreSQLConnectionPoll(env.DatabaseURL)
 	testStore = store.New(testPool)
 
-	// dummy backends that /protected/* proxies to during tests —
-	// three, so round-robin behavior can actually be observed/tested
+	// three, so round-robin is observable
 	backend1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"secret":"ok","backend":"1"}`))
@@ -69,17 +71,18 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+// register POSTs payload to /register.
 func register(payloadToSend []byte) (*http.Response, error) {
 	resp, err := http.Post(testServer.URL+"/register", "application/json",
 		bytes.NewBuffer(payloadToSend))
 	return resp, err
 }
 
-// Helper: Serializes user, handles automatic DB cleanup, and sends login/registration payload
+// createTestUser registers a user and deletes it when the test ends. It
+// returns the JSON payload and the /register response.
 func createTestUser(t *testing.T, username, password, email string) ([]byte, *http.Response) {
 	t.Helper()
 
-	// 1. Register automatic cleanup for this user
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cleanupCancel()
@@ -88,14 +91,12 @@ func createTestUser(t *testing.T, username, password, email string) ([]byte, *ht
 		}
 	})
 
-	// 2. Marshal user payload
 	user := api.CreateUserRequest{Username: username, Password: password, Email: email}
 	payload, err := json.Marshal(user)
 	if err != nil {
 		t.Fatalf("createTestUser: failed to marshal user payload: %v", err)
 	}
 
-	// 3. Perform login request
 	resp, err := register(payload)
 	if err != nil {
 		t.Fatalf("createTestUser: failed to send request: %v", err)
@@ -104,7 +105,8 @@ func createTestUser(t *testing.T, username, password, email string) ([]byte, *ht
 	return payload, resp
 }
 
-// Helper: Executes /login endpoint, logs response body, and validates returned JWT token
+// performLoginAndValidateToken logs in with payload, fails the test unless
+// it gets a valid JWT, and returns its claims and the response fields.
 func performLoginAndValidateToken(t *testing.T, payload []byte) (*auth.Claims, map[string]string) {
 	t.Helper()
 
@@ -123,7 +125,6 @@ func performLoginAndValidateToken(t *testing.T, payload []byte) (*auth.Claims, m
 		t.Fatalf("performLoginAndValidateToken: failed to read response body: %v", err)
 	}
 
-	// Print raw response body from /login
 	t.Logf("Login HTTP Status: %d", resp.StatusCode)
 	t.Logf("Login Response Body: %s", string(body))
 

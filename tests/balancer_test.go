@@ -16,7 +16,6 @@ import (
 func TestRoundRobinBalancer_SkipsUnhealthyBackend(t *testing.T) {
 	t.Log("-----------------------Test Balancer Skips Unhealthy Backend--------------------")
 
-	// Two dummy backends, each identifiable by name
 	backend1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -30,7 +29,6 @@ func TestRoundRobinBalancer_SkipsUnhealthyBackend(t *testing.T) {
 		{Name: "backend-2", URL: backend2.URL},
 	})
 
-	// Confirm both are in rotation before anything is closed
 	seenBefore := map[string]int{}
 	for i := 0; i < 10; i++ {
 		seenBefore[balancer.Next().URL]++
@@ -39,15 +37,12 @@ func TestRoundRobinBalancer_SkipsUnhealthyBackend(t *testing.T) {
 		t.Fatalf("expected both backends in rotation before closing either, got %+v", seenBefore)
 	}
 
-	// Start health checks on a short interval, then kill backend1
 	balancer.StartHealthChecks(50 * time.Millisecond)
 	backend1.Close()
 
-	// Wait past several check intervals: it takes 3 consecutive
-	// failed checks before a backend leaves rotation
+	// several intervals: removal takes 3 failed checks
 	time.Sleep(400 * time.Millisecond)
 
-	// Now backend1 should never be returned
 	seenAfter := map[string]int{}
 	for i := 0; i < 10; i++ {
 		seenAfter[balancer.Next().URL]++
@@ -65,7 +60,6 @@ func TestRoundRobinBalancer_SkipsUnhealthyBackend(t *testing.T) {
 func TestProtectedSecret_RoundRobin_DistributesAcrossBackends(t *testing.T) {
 	t.Log("-----------------------Test Round Robin Distribution--------------------")
 
-	// 1. Create user + get a valid token once
 	payload, regResp := createTestUser(t, "Robin", "meow", "robin@gmail.com")
 	if err := regResp.Body.Close(); err != nil {
 		t.Logf("Warning: failed to close setup response body: %v", err)
@@ -76,7 +70,6 @@ func TestProtectedSecret_RoundRobin_DistributesAcrossBackends(t *testing.T) {
 		t.Fatalf("TestProtectedSecret_RoundRobin_DistributesAcrossBackends: missing token in login data map")
 	}
 
-	// 2. Fire several requests, track which backend answered each one
 	seen := map[string]int{}
 	const numRequests = 9 // 3 backends × 3 full cycles
 
@@ -108,7 +101,6 @@ func TestProtectedSecret_RoundRobin_DistributesAcrossBackends(t *testing.T) {
 		seen[parsed["backend"]]++
 	}
 
-	// 3. Assert all three backends were hit
 	t.Logf("distribution: %+v", seen)
 	for _, backendID := range []string{"1", "2", "3"} {
 		if seen[backendID] == 0 {
@@ -116,7 +108,6 @@ func TestProtectedSecret_RoundRobin_DistributesAcrossBackends(t *testing.T) {
 		}
 	}
 
-	// 4. With round-robin over 9 requests / 3 backends, expect an even 3/3/3 split
 	for backendID, count := range seen {
 		if count != numRequests/3 {
 			t.Errorf("expected backend %s to receive exactly %d requests, got %d", backendID, numRequests/3, count)
@@ -124,8 +115,7 @@ func TestProtectedSecret_RoundRobin_DistributesAcrossBackends(t *testing.T) {
 	}
 }
 
-// deadAndAliveBackends returns the URL of a closed server (connections
-// are refused) and a live server that answers 200 with its name.
+// deadAndAliveBackends returns a closed server's URL and a live server.
 func deadAndAliveBackends(t *testing.T) (deadURL string, alive *httptest.Server) {
 	t.Helper()
 	dead := httptest.NewServer(http.NotFoundHandler())
@@ -149,9 +139,8 @@ func TestReverseProxy_RetriesGetOnDeadBackend(t *testing.T) {
 	front := httptest.NewServer(proxy.NewReverseProxy(balancer, ""))
 	defer front.Close()
 
-	// no active health checks: every request that lands on the dead
-	// backend must be rescued by a retry, and the failures alone must
-	// take it out of rotation
+	// no health checks: retries must rescue every request, and failures
+	// alone must eject the dead backend
 	for i := range 10 {
 		resp, err := http.Get(front.URL + "/secret")
 		if err != nil {
@@ -181,8 +170,7 @@ func TestReverseProxy_DoesNotRetryPost(t *testing.T) {
 	front := httptest.NewServer(proxy.NewReverseProxy(balancer, ""))
 	defer front.Close()
 
-	// round robin alternates, so some of these land on the dead backend;
-	// a POST may not be safe to repeat, so those must surface as 502
+	// some land on the dead backend; a POST mustn't be retried, so 502
 	badGateways := 0
 	for i := range 4 {
 		resp, err := http.Post(front.URL+"/orders", "application/json", strings.NewReader(`{"n":1}`))

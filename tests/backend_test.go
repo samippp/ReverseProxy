@@ -28,20 +28,17 @@ func TestProtectedSecret_NoToken_Returns401(t *testing.T) {
 func TestProtectedSecret_ValidToken_Returns200(t *testing.T) {
 	t.Log("---------------------Test Secret Valid Token--------------------")
 
-	// 1. Create user (handles payload serialization + DB cleanup)
 	payload, regResp := createTestUser(t, "John", "meow", "john@gmail.com")
 	if err := regResp.Body.Close(); err != nil {
 		t.Logf("Warning: failed to close setup response body: %v", err)
 	}
 
-	// 2. Perform reusable login call to get token data
 	_, data := performLoginAndValidateToken(t, payload)
 	tokenStr, exists := data["token"]
 	if !exists || tokenStr == "" {
 		t.Fatalf("TestProtectedSecret_ValidToken_Returns200: missing token in login data map")
 	}
 
-	// 3. Make request to protected endpoint using the dynamic token
 	req, err := http.NewRequest("GET", testServer.URL+"/protected/secret", nil)
 	if err != nil {
 		t.Fatalf("failed to build request: %v", err)

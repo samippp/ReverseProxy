@@ -11,8 +11,7 @@ import (
 	"github.com/samippp/ReverseProxy/config"
 )
 
-// hungAndAlive returns a backend that never answers until the test ends,
-// and one that answers immediately.
+// hungAndAlive returns a backend that never answers and one that does.
 func hungAndAlive(t *testing.T) (hung, alive *httptest.Server) {
 	t.Helper()
 	release := make(chan struct{})
@@ -30,6 +29,7 @@ func hungAndAlive(t *testing.T) (hung, alive *httptest.Server) {
 	return hung, alive
 }
 
+// get sends a GET for target/secret through rt.
 func get(t *testing.T, rt http.RoundTripper, target string) (*http.Response, error) {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, target+"/secret", nil)
@@ -48,8 +48,7 @@ func TestRetryTransport_RetriesAfterAttemptTimeout(t *testing.T) {
 	rt := &retryTransport{next: transport, balancer: balancer, maxAttempts: 3,
 		attemptTimeout: 50 * time.Millisecond, budget: time.Second}
 
-	// a hung backend never errors on its own, so only the attempt
-	// timeout can get these requests retried and the backend ejected
+	// only the attempt timeout can turn a hang into a retry
 	for i := range fallThreshold {
 		resp, err := get(t, rt, hung.URL)
 		if err != nil {
@@ -150,8 +149,7 @@ func TestRetryTransport_ErrorNamesLastBackendTried(t *testing.T) {
 	rt := &retryTransport{next: &http.Transport{}, balancer: balancer, maxAttempts: 3,
 		attemptTimeout: time.Second, budget: time.Second}
 
-	// first attempt goes to a, the retry to b; the error must name b, not
-	// the backend the original request was addressed to
+	// a, then b on retry: the error must name b
 	req := httptest.NewRequest(http.MethodGet, deadA.URL+"/secret", nil)
 	req.RequestURI = ""
 	_, err := rt.RoundTrip(req)
