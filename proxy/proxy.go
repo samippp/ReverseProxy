@@ -2,7 +2,10 @@
 package proxy
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -20,10 +23,8 @@ import (
 // reused instead of being torn down and recreated for every request —
 // avoiding rapid ephemeral port churn (and exhaustion) under load.
 //
-// The timeouts turn a backend that black-holes connections or never
-// answers into a transport error, which retryTransport reports and
-// retries. Without them a request waits until the client gives up,
-// which doesn't count against the backend, so it stays in rotation.
+// The dial timeout fails over from a black-holed backend sooner than
+// retryTransport's per-attempt timeout would on its own.
 //
 // MaxIdleConns is left at 0 (no global cap): a global cap below
 // backends × MaxIdleConnsPerHost closes the excess pooled connections
@@ -33,18 +34,22 @@ var sharedTransport = &http.Transport{
 		Timeout:   dialTimeout,
 		KeepAlive: 30 * time.Second,
 	}).DialContext,
-	ResponseHeaderTimeout: responseHeaderTimeout,
-	MaxIdleConnsPerHost:   100,
-	MaxConnsPerHost:       100,
-	IdleConnTimeout:       90 * time.Second,
+	MaxIdleConnsPerHost: 100,
+	MaxConnsPerHost:     100,
+	IdleConnTimeout:     90 * time.Second,
 }
 
 const (
 	dialTimeout = 2 * time.Second
-	// responseHeaderTimeout should stay below clients' own timeouts, so
-	// a retry on another backend can still answer in time.
-	responseHeaderTimeout = 5 * time.Second
+	// attemptTimeout bounds one try at a backend, from waiting for a
+	// pooled connection until response headers arrive. requestBudget
+	// bounds all tries together; it should stay below clients' own
+	// timeouts, so a retry can still answer before the client gives up.
+	attemptTimeout = 5 * time.Second
+	requestBudget  = 10 * time.Second
 )
+
+var errAttemptTimeout = errors.New("backend attempt timed out")
 
 // sharedBufferPool recycles the 32KB buffers ReverseProxy copies
 // response bodies through. Without it, every proxied response allocates
@@ -74,28 +79,37 @@ func (p *bufferPool) Put(b []byte) {
 // retryTransport reports failed round trips to the balancer, so dead
 // backends leave rotation without waiting for a health check, and
 // retries idempotent, bodiless requests on a backend not yet tried.
-// Only transport errors (refused, reset, dial or response-header
-// timeout) count; a backend that answers, even with a 5xx, has
-// responded and isn't retried.
+// Only transport errors (refused, reset, timed out) count; a backend
+// that answers, even with a 5xx, has responded and isn't retried.
+//
+// Each attempt runs under its own timer rather than relying on the
+// transport's ResponseHeaderTimeout, which only starts once a
+// connection is in hand: requests queued behind MaxConnsPerHost stuck
+// connections to a hung backend would otherwise wait out a whole
+// timeout before even starting theirs.
 type retryTransport struct {
-	next        http.RoundTripper
-	balancer    Balancer
-	maxAttempts int
+	next           http.RoundTripper
+	balancer       Balancer
+	maxAttempts    int
+	attemptTimeout time.Duration
+	budget         time.Duration
 }
 
 func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	deadline := time.Now().Add(t.budget)
 	tried := []string{backendKey(req.URL)}
 	for {
-		resp, err := t.next.RoundTrip(req)
-		if err != nil {
-			err = &backendError{host: req.URL.Host, err: err}
+		resp, err := t.attempt(req, min(t.attemptTimeout, time.Until(deadline)))
+		if err == nil {
+			return resp, nil
 		}
+		err = &backendError{host: req.URL.Host, err: err}
 		// a canceled context means the client went away, not the backend
-		if err == nil || req.Context().Err() != nil {
-			return resp, err
+		if req.Context().Err() != nil {
+			return nil, err
 		}
 		t.balancer.ReportFailure(req.URL)
-		if !retryable(req) || len(tried) >= t.maxAttempts {
+		if !retryable(req) || len(tried) >= t.maxAttempts || time.Until(deadline) <= 0 {
 			return nil, err
 		}
 		target := t.untriedBackend(tried)
@@ -107,6 +121,42 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		req.URL.Scheme, req.URL.Host = target.Scheme, target.Host
 		tried = append(tried, backendKey(target))
 	}
+}
+
+// attempt sends req once, canceling it if response headers don't arrive
+// within timeout. The timer stops once they do, so a long-streaming
+// body is bounded only by the client's own context.
+func (t *retryTransport) attempt(req *http.Request, timeout time.Duration) (*http.Response, error) {
+	ctx, cancel := context.WithCancelCause(req.Context())
+	timer := time.AfterFunc(timeout, func() { cancel(errAttemptTimeout) })
+	resp, err := t.next.RoundTrip(req.WithContext(ctx))
+	timer.Stop()
+	if err != nil {
+		if errors.Is(context.Cause(ctx), errAttemptTimeout) {
+			err = fmt.Errorf("%w after %v", errAttemptTimeout, timeout)
+		}
+		cancel(nil)
+		return nil, err
+	}
+	// ReverseProxy needs an upgraded (101) body to stay an
+	// io.ReadWriteCloser; ctx is released with the client's request then
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		resp.Body = &cancelOnClose{ReadCloser: resp.Body, cancel: cancel}
+	}
+	return resp, nil
+}
+
+// cancelOnClose releases an attempt's context once ReverseProxy has
+// finished copying the response body.
+type cancelOnClose struct {
+	io.ReadCloser
+	cancel context.CancelCauseFunc
+}
+
+func (b *cancelOnClose) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel(nil)
+	return err
 }
 
 // backendError records which backend a failed attempt went to. After a
@@ -147,9 +197,11 @@ func retryable(req *http.Request) bool {
 func NewReverseProxy(balancer Balancer, stripPrefix string) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Transport: &retryTransport{
-			next:        sharedTransport,
-			balancer:    balancer,
-			maxAttempts: 3,
+			next:           sharedTransport,
+			balancer:       balancer,
+			maxAttempts:    3,
+			attemptTimeout: attemptTimeout,
+			budget:         requestBudget,
 		},
 		BufferPool: sharedBufferPool,
 		Rewrite: func(r *httputil.ProxyRequest) {

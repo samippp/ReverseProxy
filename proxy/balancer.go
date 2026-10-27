@@ -29,10 +29,25 @@ const (
 	riseThreshold = 2
 )
 
+// A removed backend also stays out for an ejection period, however
+// healthy its checks look. /health can pass while real requests hang,
+// so passing checks alone would let such a backend back in every few
+// seconds. The period doubles each time a backend is removed again
+// within stableAfter of returning, up to maxEjection.
+const (
+	baseEjection = 10 * time.Second
+	maxEjection  = 5 * time.Minute
+	stableAfter  = time.Minute
+)
+
 type backendState struct {
 	healthy bool
 	fails   int
 	passes  int
+
+	ejections    int // removals in a row without a stable stretch in rotation
+	ejectedUntil time.Time
+	returnedAt   time.Time
 }
 
 type RoundRobinBalancer struct {
@@ -46,6 +61,7 @@ type RoundRobinBalancer struct {
 
 	mu     sync.Mutex // guards states; never taken by Next
 	states map[string]*backendState
+	now    func() time.Time // replaced in tests
 }
 
 func NewRoundRobinBalancer(backends []config.Backend) *RoundRobinBalancer {
@@ -56,6 +72,7 @@ func NewRoundRobinBalancer(backends []config.Backend) *RoundRobinBalancer {
 		backends: backends,
 		keys:     make([]string, len(backends)),
 		states:   make(map[string]*backendState, len(backends)),
+		now:      time.Now,
 	}
 	for i, backend := range backends {
 		u, err := url.Parse(backend.URL)
@@ -89,7 +106,8 @@ func (b *RoundRobinBalancer) ReportFailure(target *url.URL) {
 }
 
 // record applies one check or request result to a backend, moving it
-// in or out of rotation once it crosses the fall/rise threshold.
+// in or out of rotation once it crosses the fall/rise threshold and,
+// for a removed backend, its ejection period is over.
 func (b *RoundRobinBalancer) record(key string, ok bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -97,11 +115,13 @@ func (b *RoundRobinBalancer) record(key string, ok bool) {
 	if !found {
 		return
 	}
+	now := b.now()
 	if ok {
 		s.fails = 0
 		s.passes++
-		if !s.healthy && s.passes >= riseThreshold {
+		if !s.healthy && s.passes >= riseThreshold && !now.Before(s.ejectedUntil) {
 			s.healthy = true
+			s.returnedAt = now
 			log.Printf("backend=%s back in rotation", key)
 			b.publish()
 		}
@@ -111,9 +131,27 @@ func (b *RoundRobinBalancer) record(key string, ok bool) {
 	s.fails++
 	if s.healthy && s.fails >= fallThreshold {
 		s.healthy = false
-		log.Printf("backend=%s removed from rotation after %d consecutive failures", key, s.fails)
+		if s.ejections > 0 && now.Sub(s.returnedAt) < stableAfter {
+			s.ejections++
+		} else {
+			s.ejections = 1
+		}
+		ejection := ejectionPeriod(s.ejections)
+		s.ejectedUntil = now.Add(ejection)
+		log.Printf("backend=%s removed from rotation for at least %v after %d consecutive failures",
+			key, ejection, s.fails)
 		b.publish()
 	}
+}
+
+// ejectionPeriod is baseEjection doubled for each removal after the
+// first, capped at maxEjection.
+func ejectionPeriod(ejections int) time.Duration {
+	d := baseEjection
+	for i := 1; i < ejections && d < maxEjection; i++ {
+		d *= 2
+	}
+	return min(d, maxEjection)
 }
 
 // publish swaps in a fresh snapshot of healthy backends. Callers other

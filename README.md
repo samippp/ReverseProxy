@@ -15,6 +15,7 @@ Client → [Gateway :8080] → JWT auth → Load balancer → Backend replica (1
 - **Active health checks:** a background goroutine pings each backend's `/health` endpoint on an interval and routes around backends that fail.
 - **Passive health checks and retries:** a failed proxied request counts against its backend immediately, without waiting for the next check. Safe-to-repeat requests (GET, HEAD, OPTIONS without a body) are retried on a different backend, so clients don't see the failure.
 - **Flap protection:** a backend leaves rotation only after 3 consecutive failures, and returns only after 2 consecutive passing checks.
+- **Ejection backoff:** a removed backend stays out for at least 10s. If it fails again within a minute of returning, it stays out twice as long the next time, up to 5 minutes. This stops a backend whose `/health` passes while its real requests hang from cycling back into rotation every few seconds.
 - **Path stripping** — the gateway's public routes are decoupled from backend-internal routes (`/protected/secret` → backend sees `/secret`)
 - **HTTP connection pooling** — reuses TCP connections to backends instead of opening a new one per request
 - **PostgreSQL persistence** via `pgxpool`, with `sqlc`-generated type-safe queries
@@ -27,7 +28,7 @@ Requests flow through the gateway as follows:
 1. **Auth middleware** validates the JWT on `/protected/*` routes, rejecting unauthenticated requests with `401` before they reach the proxy layer
 2. **Load balancer** (`RoundRobinBalancer`) picks the next backend from an immutable list of the healthy ones, using an atomic counter for the rotation. `Next()` is called by every in-flight request, so it never takes a lock. When a backend's health changes, the balancer builds a new list and swaps it in atomically.
 3. **Reverse proxy** rewrites the outbound request (via `httputil.ReverseProxy`'s `Rewrite` hook — the modern replacement for the deprecated `Director` field) to point at the selected backend, stripping the gateway-facing path prefix
-4. **Health tracking** combines two signals: a background goroutine pinging every backend's `/health` endpoint, and failures reported by proxied requests. A backend is removed after 3 consecutive failures from either source, and re-added after 2 consecutive passing checks.
+4. **Health tracking** combines two signals: a background goroutine pinging every backend's `/health` endpoint, and failures reported by proxied requests. A backend is removed after 3 consecutive failures from either source, and re-added after 2 consecutive passing checks once its ejection period is over. That period starts at 10s and doubles each time the backend fails again soon after returning, up to 5 minutes.
 5. **Retries:** when a request fails to reach a backend (connection refused, reset or timed out), the proxy retries it on a backend it hasn't tried yet, up to 3 attempts. This only applies to GET, HEAD and OPTIONS requests without a body. A POST might not be safe to send twice, so it fails with a 502. A backend that answers, even with a 5xx error, isn't retried.
 
 ```go
@@ -128,10 +129,9 @@ var sharedTransport = &http.Transport{
         Timeout:   2 * time.Second,
         KeepAlive: 30 * time.Second,
     }).DialContext,
-    ResponseHeaderTimeout: 5 * time.Second,
-    MaxIdleConnsPerHost:   100,
-    MaxConnsPerHost:       100,
-    IdleConnTimeout:       90 * time.Second,
+    MaxIdleConnsPerHost: 100,
+    MaxConnsPerHost:     100,
+    IdleConnTimeout:     90 * time.Second,
 }
 ```
 
@@ -139,7 +139,9 @@ var sharedTransport = &http.Transport{
 
 Two later changes:
 - **No global idle cap.** The transport originally also set `MaxIdleConns: 200`. That was below 3 backends × 100, so after every burst the transport closed 100 pooled connections, only to open them again on the next burst. Leaving `MaxIdleConns` at 0 means there's no global cap, and `MaxIdleConnsPerHost` still caps each backend at 100 idle connections.
-- **Timeouts.** Stress testing showed that without them, a backend that never answers, or one whose network silently drops connection attempts, makes requests hang until the client gives up. Those requests don't count against the backend, so it stays in rotation. With a 2s connect timeout and a 5s wait for the response to start, the failure becomes an error that removes the backend and triggers a retry.
+- **Timeouts.** Stress testing showed that without them, a backend that never answers, or one whose network silently drops connection attempts, makes requests hang until the client gives up. Those requests don't count against the backend, so it stays in rotation. Now the transport gives up on connecting after 2s, and the retry layer gives each attempt 5s to get a response started, with a 10s budget across all attempts. A timeout counts as a failure, which removes the backend and triggers a retry.
+
+  The 5s clock starts before the request has a connection, not when it's sent. An earlier version used the transport's `ResponseHeaderTimeout`, which only starts once a connection is in hand. When all 100 connections to a hung backend were stuck, new requests first waited up to 5s for one to free up, and only then started their own 5s clock. In a 30-second test with a hung backend and clients that give up at 10s, that caused 362 client timeouts. Timing the whole attempt brought it to 0, and the slowest request fell from 10.0s to 5.2s. The clock stops once the response headers arrive, so slow response bodies aren't cut off.
 
 ## Project structure
 
