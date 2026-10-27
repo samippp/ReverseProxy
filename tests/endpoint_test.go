@@ -1,4 +1,4 @@
-package tests // Change return type from auth.Claims to *auth.Claimpackage tests
+package tests
 
 import (
 	"bytes"
@@ -13,8 +13,6 @@ import (
 	"github.com/samippp/ReverseProxy/config"
 )
 
-// --- Tests ---
-
 func TestLoadConfig(t *testing.T) {
 	c := config.ImportServerConfig()
 	t.Log(c)
@@ -26,7 +24,6 @@ func TestRegisterWithServer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	// Reusable creation + cleanup setup
 	_, resp := createTestUser(t, "John", "meow", "john@gmail.com")
 	defer resp.Body.Close()
 
@@ -51,13 +48,11 @@ func TestRegisterWithServer(t *testing.T) {
 func TestLoginWithServer(t *testing.T) {
 	t.Log("------------------Login-----------------")
 
-	// Create user (handles payload serialization + DB cleanup)
 	payload, regResp := createTestUser(t, "John", "meow", "john@gmail.com")
 	if err := regResp.Body.Close(); err != nil {
 		t.Logf("Warning: failed to close setup response body: %v", err)
 	}
 
-	// Reusable login call + token validation
 	claims, _ := performLoginAndValidateToken(t, payload)
 	t.Log(claims)
 }
@@ -101,7 +96,7 @@ func TestLoginWithServer_UnknownUser_TakesAsLongAsWrongPassword(t *testing.T) {
 		t.Logf("Warning: failed to close setup response body: %v", err)
 	}
 
-	// fastest of a few attempts, to keep scheduling noise out
+	// fastest of 3, to filter scheduling noise
 	timeLogin := func(username string) time.Duration {
 		payload, err := json.Marshal(api.CreateUserRequest{Username: username, Password: "wrong"})
 		if err != nil {

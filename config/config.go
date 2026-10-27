@@ -1,4 +1,4 @@
-// Package config used for importing .env and server Configs
+// Package config loads .env and the YAML server config.
 package config
 
 import (
@@ -10,28 +10,33 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// ServerConfig is the YAML file at SERVER_CONFIG.
 type ServerConfig struct {
 	Server   Server               `yaml:"server"`
 	Routes   []Route              `yaml:"routes"`
 	Backends map[string][]Backend `yaml:"backends"`
 }
 
+// Backend is one backend replica.
 type Backend struct {
 	Name string `yaml:"name"`
 	URL  string `yaml:"url"`
 }
 
+// Server is where the gateway listens.
 type Server struct {
 	Hostname string `yaml:"hostname"`
 	Port     int    `yaml:"port"`
 	Endpoint string `yaml:"endpoint"`
 }
 
+// Route is parsed but not yet used by the router.
 type Route struct {
 	Service string `yaml:"service"`
 	Value   string `yaml:"value"`
 }
 
+// EnvConfig holds settings from .env.
 type EnvConfig struct {
 	ServerConfig string
 	DatabaseURL  string
@@ -39,14 +44,15 @@ type EnvConfig struct {
 	ProxySecret  string
 }
 
+// LoadEnv loads the nearest .env at or above the working directory.
+// It exits if there is none.
 func LoadEnv() *EnvConfig {
 	dir, _ := os.Getwd()
 	for {
 		path := filepath.Join(dir, ".env")
 		if _, err := os.Stat(path); err == nil {
 			godotenv.Load(path)
-			// a relative SERVER_CONFIG is resolved against the .env's
-			// directory, so the same .env works from any cwd and OS
+			// relative to the .env, so it works from any cwd
 			serverConfig := os.Getenv("SERVER_CONFIG")
 			if serverConfig != "" && !filepath.IsAbs(serverConfig) {
 				serverConfig = filepath.Join(dir, serverConfig)
@@ -66,6 +72,7 @@ func LoadEnv() *EnvConfig {
 	}
 }
 
+// ImportServerConfig reads the YAML config, exiting on failure.
 func ImportServerConfig() ServerConfig {
 	serverConfigPath := LoadEnv().ServerConfig
 	yamlFile, err := os.ReadFile(serverConfigPath)

@@ -1,3 +1,4 @@
+// Package secret serves the legacy backend's protected message.
 package secret
 
 import (
@@ -5,6 +6,7 @@ import (
 	"net/http"
 )
 
+// Handler replies with a secret message naming X-User-Id.
 func Handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := r.Header.Get("X-User-Id")

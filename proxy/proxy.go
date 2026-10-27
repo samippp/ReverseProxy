@@ -1,4 +1,3 @@
-// Package proxy handles all http contents
 package proxy
 
 import (
@@ -17,18 +16,9 @@ import (
 	"time"
 )
 
-// sharedTransport is reused across all reverse proxies this package
-// creates. It raises the default per-host connection limits so that
-// under concurrent load, connections to a backend are pooled and
-// reused instead of being torn down and recreated for every request —
-// avoiding rapid ephemeral port churn (and exhaustion) under load.
-//
-// The dial timeout fails over from a black-holed backend sooner than
-// retryTransport's per-attempt timeout would on its own.
-//
-// MaxIdleConns is left at 0 (no global cap): a global cap below
-// backends × MaxIdleConnsPerHost closes the excess pooled connections
-// after every burst, only for them to be redialed on the next one.
+// sharedTransport is shared by all proxies so backend connections are pooled.
+// MaxIdleConns stays 0 (no global cap): a cap below backends × per-host
+// idle conns closes pooled connections after every burst.
 var sharedTransport = &http.Transport{
 	DialContext: (&net.Dialer{
 		Timeout:   dialTimeout,
@@ -39,22 +29,22 @@ var sharedTransport = &http.Transport{
 	IdleConnTimeout:     90 * time.Second,
 }
 
+// Backend timeouts. The dial timeout fails over from a black-holed
+// backend sooner than attemptTimeout would.
 const (
 	dialTimeout = 2 * time.Second
-	// attemptTimeout bounds one try at a backend, from waiting for a
-	// pooled connection until response headers arrive. requestBudget
-	// bounds all tries together; it should stay below clients' own
-	// timeouts, so a retry can still answer before the client gives up.
+	// attemptTimeout covers one try, from waiting for a connection to
+	// response headers. requestBudget covers all tries; keep it below
+	// clients' timeouts so a retry can still answer in time.
 	attemptTimeout = 5 * time.Second
 	requestBudget  = 10 * time.Second
 )
 
+// errAttemptTimeout is the cancel cause when an attempt runs out of time.
 var errAttemptTimeout = errors.New("backend attempt timed out")
 
-// sharedBufferPool recycles the 32KB buffers ReverseProxy copies
-// response bodies through. Without it, every proxied response allocates
-// a fresh buffer, which was ~77% of all bytes allocated under load and
-// the main source of GC pressure.
+// sharedBufferPool reuses ReverseProxy's 32KB copy buffers; allocating one
+// per response was ~77% of all allocated bytes.
 var sharedBufferPool = &bufferPool{
 	pool: sync.Pool{New: func() any {
 		b := make([]byte, 32*1024)
@@ -62,31 +52,25 @@ var sharedBufferPool = &bufferPool{
 	}},
 }
 
-// bufferPool adapts sync.Pool to httputil.BufferPool. It stores
-// *[]byte rather than []byte so Get doesn't allocate a slice header.
+// bufferPool adapts sync.Pool to httputil.BufferPool. It stores *[]byte so
+// Get doesn't allocate.
 type bufferPool struct {
 	pool sync.Pool
 }
 
+// Get returns a pooled buffer.
 func (p *bufferPool) Get() []byte {
 	return *p.pool.Get().(*[]byte)
 }
 
+// Put returns a buffer to the pool.
 func (p *bufferPool) Put(b []byte) {
 	p.pool.Put(&b)
 }
 
-// retryTransport reports failed round trips to the balancer, so dead
-// backends leave rotation without waiting for a health check, and
-// retries idempotent, bodiless requests on a backend not yet tried.
-// Only transport errors (refused, reset, timed out) count; a backend
-// that answers, even with a 5xx, has responded and isn't retried.
-//
-// Each attempt runs under its own timer rather than relying on the
-// transport's ResponseHeaderTimeout, which only starts once a
-// connection is in hand: requests queued behind MaxConnsPerHost stuck
-// connections to a hung backend would otherwise wait out a whole
-// timeout before even starting theirs.
+// retryTransport reports transport errors (refused, reset, timed out) to
+// the balancer and retries bodiless GET/HEAD/OPTIONS on an untried backend.
+// A backend that answers, even with a 5xx, isn't retried.
 type retryTransport struct {
 	next           http.RoundTripper
 	balancer       Balancer
@@ -95,6 +79,8 @@ type retryTransport struct {
 	budget         time.Duration
 }
 
+// RoundTrip tries backends until one answers, the attempts run out or the
+// request budget is spent.
 func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	deadline := time.Now().Add(t.budget)
 	tried := []string{backendKey(req.URL)}
@@ -123,9 +109,8 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 }
 
-// attempt sends req once, canceling it if response headers don't arrive
-// within timeout. The timer stops once they do, so a long-streaming
-// body is bounded only by the client's own context.
+// attempt sends req once, canceling it if headers don't arrive within
+// timeout. The timer stops at headers so slow bodies aren't cut off.
 func (t *retryTransport) attempt(req *http.Request, timeout time.Duration) (*http.Response, error) {
 	ctx, cancel := context.WithCancelCause(req.Context())
 	timer := time.AfterFunc(timeout, func() { cancel(errAttemptTimeout) })
@@ -138,39 +123,41 @@ func (t *retryTransport) attempt(req *http.Request, timeout time.Duration) (*htt
 		cancel(nil)
 		return nil, err
 	}
-	// ReverseProxy needs an upgraded (101) body to stay an
-	// io.ReadWriteCloser; ctx is released with the client's request then
+	// a 101 body must stay an io.ReadWriteCloser; ctx ends with the client's
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		resp.Body = &cancelOnClose{ReadCloser: resp.Body, cancel: cancel}
 	}
 	return resp, nil
 }
 
-// cancelOnClose releases an attempt's context once ReverseProxy has
-// finished copying the response body.
+// cancelOnClose releases an attempt's context when the body is closed.
 type cancelOnClose struct {
 	io.ReadCloser
 	cancel context.CancelCauseFunc
 }
 
+// Close closes the body, then releases the context.
 func (b *cancelOnClose) Close() error {
 	err := b.ReadCloser.Close()
 	b.cancel(nil)
 	return err
 }
 
-// backendError records which backend a failed attempt went to. After a
-// retry that differs from the request ReverseProxy passes to ErrorHandler.
+// backendError names the backend a failed attempt went to, which differs
+// from ErrorHandler's request after a retry.
 type backendError struct {
 	host string
 	err  error
 }
 
+// Error returns the underlying error's message.
 func (e *backendError) Error() string { return e.err.Error() }
+
+// Unwrap returns the underlying error.
 func (e *backendError) Unwrap() error { return e.err }
 
-// untriedBackend asks the balancer for a backend not in tried. The
-// search is bounded because the balancer may only have tried ones left.
+// untriedBackend returns a backend not in tried, or nil. The search is
+// bounded since only tried backends may be left.
 func (t *retryTransport) untriedBackend(tried []string) *url.URL {
 	for range 2 * t.maxAttempts {
 		u, err := url.Parse(t.balancer.Next().URL)
@@ -181,6 +168,7 @@ func (t *retryTransport) untriedBackend(tried []string) *url.URL {
 	return nil
 }
 
+// retryable reports whether req is safe to send again.
 func retryable(req *http.Request) bool {
 	switch req.Method {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
@@ -189,11 +177,8 @@ func retryable(req *http.Request) bool {
 	return false
 }
 
-// NewReverseProxy builds a reverse proxy that forwards each incoming
-// request to whichever backend the given Balancer selects for that
-// request, stripping the given path prefix so the backend sees its
-// own native path rather than the gateway-facing one. Logs which
-// backend served each request and the response status code.
+// NewReverseProxy proxies each request to the backend balancer picks,
+// stripping stripPrefix from the path.
 func NewReverseProxy(balancer Balancer, stripPrefix string) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Transport: &retryTransport{
@@ -232,8 +217,7 @@ func NewReverseProxy(balancer Balancer, stripPrefix string) *httputil.ReversePro
 	}
 }
 
-// LoggingMiddleware wraps an http.Handler and logs the method, path,
-// status code, and elapsed time for every request it handles.
+// LoggingMiddleware logs method, path, status and duration per request.
 func LoggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -244,13 +228,13 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// statusRecorder wraps http.ResponseWriter to capture the status code
-// that gets written, since ResponseWriter doesn't expose it directly.
+// statusRecorder captures the status code written to a ResponseWriter.
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
 }
 
+// WriteHeader records status and passes it on.
 func (r *statusRecorder) WriteHeader(status int) {
 	r.status = status
 	r.ResponseWriter.WriteHeader(status)

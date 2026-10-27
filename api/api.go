@@ -1,4 +1,4 @@
-// Package api for business logic with api endpoints
+// Package api serves the home, register and login endpoints.
 package api
 
 import (
@@ -17,22 +17,26 @@ import (
 	"github.com/samippp/ReverseProxy/store"
 )
 
+// CreateUserRequest is the JSON body of /register and /login.
 type CreateUserRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 	Email    string `json:"email"`
 }
 
+// Handler serves the API endpoints.
 type Handler struct {
 	store     *store.Store
 	envConfig *config.EnvConfig
 }
 
+// New returns a Handler backed by store.
 func New(store *store.Store) Handler {
 	env := config.LoadEnv()
 	return Handler{store, env}
 }
 
+// HomeHandler serves a static welcome message.
 func (h *Handler) HomeHandler(w http.ResponseWriter, r *http.Request) {
 	defer fmt.Println("Response delivered")
 	w.Header().Set("Content-Type", "application/json")
@@ -40,6 +44,7 @@ func (h *Handler) HomeHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"message" : "This is homepage"}`))
 }
 
+// RegisterHandler creates a user from a POSTed CreateUserRequest.
 func (h *Handler) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -70,6 +75,7 @@ func (h *Handler) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 	writeUser(w, user)
 }
 
+// Login checks POSTed credentials and returns a JWT.
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -114,13 +120,13 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// writeBusy tells the client to back off when password hashing is
-// saturated, instead of letting logins queue without bound.
+// writeBusy replies 503 with Retry-After when password hashing is saturated.
 func writeBusy(w http.ResponseWriter) {
 	w.Header().Set("Retry-After", "1")
 	http.Error(w, "server busy, retry later", http.StatusServiceUnavailable)
 }
 
+// writeUser writes user as JSON, without the password hash.
 func writeUser(w http.ResponseWriter, user generated.User) error {
 	w.Header().Set("Content-Type", "application/json")
 	return json.NewEncoder(w).Encode(map[string]any{
@@ -131,6 +137,7 @@ func writeUser(w http.ResponseWriter, user generated.User) error {
 	})
 }
 
+// CheckUserExist returns the user named username.
 func (h *Handler) CheckUserExist(ctx context.Context, username string) (generated.User, error) {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
@@ -142,6 +149,7 @@ func (h *Handler) CheckUserExist(ctx context.Context, username string) (generate
 	return user, nil
 }
 
+// DeleteUser deletes the user named username.
 func (h *Handler) DeleteUser(ctx context.Context, username string) error {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
@@ -149,6 +157,7 @@ func (h *Handler) DeleteUser(ctx context.Context, username string) error {
 	return err
 }
 
+// SecretHandler is an unused stub.
 func (h *Handler) SecretHandler(w http.ResponseWriter, r *http.Response) error {
 	return nil
 }
