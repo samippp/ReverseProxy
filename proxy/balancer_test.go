@@ -11,14 +11,19 @@ import (
 // fakeClock lets tests move past ejection periods without sleeping.
 type fakeClock struct{ t time.Time }
 
-func (c *fakeClock) now() time.Time          { return c.t }
+// now returns the fake time.
+func (c *fakeClock) now() time.Time { return c.t }
+
+// advance moves the fake time forward.
 func (c *fakeClock) advance(d time.Duration) { c.t = c.t.Add(d) }
 
+// newTestBalancer returns a two-backend balancer on a fake clock.
 func newTestBalancer() *RoundRobinBalancer {
 	b, _ := newClockedTestBalancer()
 	return b
 }
 
+// newClockedTestBalancer is newTestBalancer, also returning its clock.
 func newClockedTestBalancer() (*RoundRobinBalancer, *fakeClock) {
 	b := NewRoundRobinBalancer([]config.Backend{
 		{Name: "a", URL: "http://a.test:1"},
@@ -29,12 +34,14 @@ func newClockedTestBalancer() (*RoundRobinBalancer, *fakeClock) {
 	return b, clock
 }
 
+// eject fails key enough times to remove it from rotation.
 func eject(b *RoundRobinBalancer, key string) {
 	for range fallThreshold {
 		b.record(key, false)
 	}
 }
 
+// inRotation reports whether backendURL is in the healthy snapshot.
 func inRotation(b *RoundRobinBalancer, backendURL string) bool {
 	for _, backend := range *b.healthy.Load() {
 		if backend.URL == backendURL {

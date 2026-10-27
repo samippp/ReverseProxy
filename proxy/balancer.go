@@ -1,4 +1,3 @@
-// Package proxy handles all http contents
 package proxy
 
 import (
@@ -13,50 +12,47 @@ import (
 	"github.com/samippp/ReverseProxy/config"
 )
 
+// Balancer picks backends and tracks their health.
 type Balancer interface {
+	// Next returns the backend for the next request.
 	Next() config.Backend
-	// ReportFailure records a failed request to the backend at target,
-	// so a dead backend can leave rotation before its next health check.
+	// ReportFailure counts a failed request against target's backend.
 	ReportFailure(target *url.URL)
 }
 
-// A backend leaves rotation after fallThreshold consecutive failures
-// (health checks or proxied requests) and only returns after
-// riseThreshold consecutive passing health checks, so a flaky backend
-// doesn't flip in and out of rotation on every check.
+// Consecutive failures to leave rotation, and passing checks to return.
 const (
 	fallThreshold = 3
 	riseThreshold = 2
 )
 
-// A removed backend also stays out for an ejection period, however
-// healthy its checks look. /health can pass while real requests hang,
-// so passing checks alone would let such a backend back in every few
-// seconds. The period doubles each time a backend is removed again
-// within stableAfter of returning, up to maxEjection.
+// A removed backend stays out for an ejection period even if /health
+// passes, since it can pass while real requests hang. The period doubles
+// when it's removed again within stableAfter of returning.
 const (
 	baseEjection = 10 * time.Second
 	maxEjection  = 5 * time.Minute
 	stableAfter  = time.Minute
 )
 
+// backendState is one backend's health; guarded by RoundRobinBalancer.mu.
 type backendState struct {
 	healthy bool
 	fails   int
 	passes  int
 
-	ejections    int // removals in a row without a stable stretch in rotation
+	ejections    int // removals without a stable stretch in between
 	ejectedUntil time.Time
 	returnedAt   time.Time
 }
 
+// RoundRobinBalancer rotates over healthy backends.
 type RoundRobinBalancer struct {
 	backends []config.Backend
 	keys     []string // backendKey of each backend, same order
 	counter  atomic.Uint64
 
-	// healthy is an immutable snapshot of the backends in rotation,
-	// replaced whenever one changes state, so Next never takes a lock
+	// healthy is an immutable snapshot, swapped on change; Next never locks
 	healthy atomic.Pointer[[]config.Backend]
 
 	mu     sync.Mutex // guards states; never taken by Next
@@ -64,6 +60,8 @@ type RoundRobinBalancer struct {
 	now    func() time.Time // replaced in tests
 }
 
+// NewRoundRobinBalancer starts with all backends healthy. It panics on an
+// empty list or a bad URL.
 func NewRoundRobinBalancer(backends []config.Backend) *RoundRobinBalancer {
 	if len(backends) == 0 {
 		panic("proxy: NewRoundRobinBalancer called with empty backend list")
@@ -86,28 +84,29 @@ func NewRoundRobinBalancer(backends []config.Backend) *RoundRobinBalancer {
 	return b
 }
 
-// backendKey identifies a backend by scheme and host, which is what an
-// outbound request's URL still carries after the path is rewritten.
+// backendKey identifies a backend by scheme and host, which outbound
+// request URLs keep after path rewriting.
 func backendKey(u *url.URL) string {
 	return u.Scheme + "://" + u.Host
 }
 
+// Next returns the next healthy backend, or any backend if none are.
 func (b *RoundRobinBalancer) Next() config.Backend {
 	list := *b.healthy.Load()
 	if len(list) == 0 {
-		// every backend is down: fail open rather than refuse outright
+		// all down: fail open
 		list = b.backends
 	}
 	return list[b.counter.Add(1)%uint64(len(list))]
 }
 
+// ReportFailure counts a failed request against target's backend.
 func (b *RoundRobinBalancer) ReportFailure(target *url.URL) {
 	b.record(backendKey(target), false)
 }
 
-// record applies one check or request result to a backend, moving it
-// in or out of rotation once it crosses the fall/rise threshold and,
-// for a removed backend, its ejection period is over.
+// record applies one result to a backend, moving it in or out of rotation
+// at the fall/rise thresholds once any ejection period is over.
 func (b *RoundRobinBalancer) record(key string, ok bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -144,8 +143,7 @@ func (b *RoundRobinBalancer) record(key string, ok bool) {
 	}
 }
 
-// ejectionPeriod is baseEjection doubled for each removal after the
-// first, capped at maxEjection.
+// ejectionPeriod doubles baseEjection per repeat removal, up to maxEjection.
 func ejectionPeriod(ejections int) time.Duration {
 	d := baseEjection
 	for i := 1; i < ejections && d < maxEjection; i++ {
@@ -154,8 +152,7 @@ func ejectionPeriod(ejections int) time.Duration {
 	return min(d, maxEjection)
 }
 
-// publish swaps in a fresh snapshot of healthy backends. Callers other
-// than the constructor must hold b.mu.
+// publish stores a new healthy snapshot. Hold b.mu, except in the constructor.
 func (b *RoundRobinBalancer) publish() {
 	healthy := make([]config.Backend, 0, len(b.backends))
 	for i, backend := range b.backends {
@@ -166,10 +163,7 @@ func (b *RoundRobinBalancer) publish() {
 	b.healthy.Store(&healthy)
 }
 
-// StartHealthChecks launches a background goroutine that periodically
-// pings each backend's health endpoint and updates the balancer's
-// health status accordingly. It runs until the process exits — for
-// this project, there's no need to stop it early.
+// StartHealthChecks GETs every backend's /health each interval, forever.
 func (b *RoundRobinBalancer) StartHealthChecks(interval time.Duration) {
 	go func() {
 		client := &http.Client{Timeout: 2 * time.Second}
@@ -184,6 +178,7 @@ func (b *RoundRobinBalancer) StartHealthChecks(interval time.Duration) {
 	}()
 }
 
+// checkOne records whether one backend's /health returned 200.
 func (b *RoundRobinBalancer) checkOne(client *http.Client, backendURL, key string) {
 	resp, err := client.Get(backendURL + "/health")
 	healthy := err == nil && resp.StatusCode == http.StatusOK

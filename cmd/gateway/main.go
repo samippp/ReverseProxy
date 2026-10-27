@@ -1,3 +1,4 @@
+// Command gateway runs the API gateway.
 package main
 
 import (
@@ -19,8 +20,7 @@ func main() {
 	env := config.LoadEnv()
 	pool := db.PostgreSQLConnectionPoll(env.DatabaseURL)
 
-	// pprof registers on http.DefaultServeMux, which the gateway's own
-	// router doesn't use, so profiles are only reachable on this port
+	// pprof uses DefaultServeMux, which the router doesn't, so it's only on this port
 	if addr := os.Getenv("PPROF_ADDR"); addr != "" {
 		go func() {
 			log.Printf("pprof listening on %s", addr)

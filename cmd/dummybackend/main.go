@@ -1,7 +1,4 @@
-// Command dummybackend is a throwaway stand-in backend used for local
-// load testing of the reverse proxy. It is not part of the proxy's own
-// logic and is not exercised by `go test` — run it as its own process
-// so the gateway (cmd/gateway) has something real to route traffic to.
+// Command dummybackend is a stand-in backend for local load testing.
 package main
 
 import (
@@ -22,9 +19,7 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	// Only a real, specific route — not a catch-all — so a broken
-	// path-stripping upstream shows up as a 404 here instead of being
-	// silently masked.
+	// no catch-all, so a path-stripping bug shows up as a 404
 	mux.HandleFunc("/secret", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)

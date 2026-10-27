@@ -1,3 +1,4 @@
+// Package store manages users in PostgreSQL, including password hashing.
 package store
 
 import (
@@ -14,18 +15,18 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// Store wraps the sqlc queries.
 type Store struct {
 	queries *db.Queries
-	// bcryptSlots caps concurrent bcrypt work. Each hash costs ~50ms of
-	// CPU, so an unbounded login flood starves the proxy on the same
-	// cores; this leaves at least half of them for proxied traffic.
+	// bcryptSlots caps concurrent bcrypt (~50ms CPU each) so logins
+	// can't starve proxied traffic.
 	bcryptSlots chan struct{}
-	// dummyHash is compared against when the username doesn't exist, so
-	// an unknown user takes as long as a wrong password and response
-	// times don't reveal which usernames are registered.
+	// dummyHash is checked for unknown users, so they take as long as a
+	// wrong password and timing doesn't reveal usernames.
 	dummyHash []byte
 }
 
+// New returns a Store using pool.
 func New(pool *pgxpool.Pool) *Store {
 	dummyHash, err := bcrypt.GenerateFromPassword([]byte(rand.Text()), bcrypt.DefaultCost)
 	if err != nil {
@@ -41,6 +42,8 @@ func New(pool *pgxpool.Pool) *Store {
 // ErrBusy is returned when ctx ends while waiting for a bcrypt slot.
 var ErrBusy = errors.New("too many concurrent password operations")
 
+// withBcryptSlot runs f once a bcrypt slot is free, or returns ErrBusy
+// if ctx ends first.
 func (s *Store) withBcryptSlot(ctx context.Context, f func()) error {
 	select {
 	case s.bcryptSlots <- struct{}{}:
@@ -52,8 +55,8 @@ func (s *Store) withBcryptSlot(ctx context.Context, f func()) error {
 	return nil
 }
 
+// CreateUser inserts a user with an already-hashed password.
 func (s *Store) CreateUser(ctx context.Context, username, password, email string) (db.User, error) {
-	// business logic goes here (e.g. hash password)
 	return s.queries.CreateUser(ctx, db.CreateUserParams{
 		Username: username,
 		Password: password,
@@ -61,6 +64,7 @@ func (s *Store) CreateUser(ctx context.Context, username, password, email string
 	})
 }
 
+// RegisterUser hashes password and creates the user.
 func (s *Store) RegisterUser(context context.Context, username, password, email string) (db.User, error) {
 	var hashedPassword []byte
 	var err error
@@ -79,11 +83,10 @@ func (s *Store) RegisterUser(context context.Context, username, password, email 
 	return user, nil
 }
 
-// ErrInvalidCredentials is returned by Login when the username doesn't
-// exist or the password doesn't match, so callers can tell a bad login
-// apart from a database failure.
+// ErrInvalidCredentials means an unknown username or a wrong password.
 var ErrInvalidCredentials = errors.New("invalid username or password")
 
+// Login returns the user if password matches.
 func (s *Store) Login(context context.Context, username, password string) (db.User, error) {
 	queriedUser, err := s.GetUserByUsername(context, username)
 	userExists := err == nil
@@ -94,7 +97,6 @@ func (s *Store) Login(context context.Context, username, password string) (db.Us
 	if userExists {
 		hash = []byte(queriedUser.Password)
 	}
-	// compare password for auth
 	if slotErr := s.withBcryptSlot(context, func() {
 		err = bcrypt.CompareHashAndPassword(hash, []byte(password))
 	}); slotErr != nil {
@@ -109,10 +111,12 @@ func (s *Store) Login(context context.Context, username, password string) (db.Us
 	return queriedUser, nil
 }
 
+// GetUserByUsername looks up a user.
 func (s *Store) GetUserByUsername(ctx context.Context, username string) (db.User, error) {
 	return s.queries.GetUserByUsername(ctx, username)
 }
 
+// DeleteUserByUserName deletes a user.
 func (s *Store) DeleteUserByUserName(ctx context.Context, username string) error {
 	return s.queries.DeleteUserByUserName(ctx, username)
 }
