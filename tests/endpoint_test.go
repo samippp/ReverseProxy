@@ -92,3 +92,42 @@ func TestLoginWithServer_WrongPassword_Returns401(t *testing.T) {
 		t.Errorf("expected no token in response body, got: %s", body)
 	}
 }
+
+func TestLoginWithServer_UnknownUser_TakesAsLongAsWrongPassword(t *testing.T) {
+	t.Log("------------------Login Unknown User Timing-----------------")
+
+	_, regResp := createTestUser(t, "Trent", "meow", "trent@gmail.com")
+	if err := regResp.Body.Close(); err != nil {
+		t.Logf("Warning: failed to close setup response body: %v", err)
+	}
+
+	// fastest of a few attempts, to keep scheduling noise out
+	timeLogin := func(username string) time.Duration {
+		payload, err := json.Marshal(api.CreateUserRequest{Username: username, Password: "wrong"})
+		if err != nil {
+			t.Fatalf("failed to marshal login payload: %v", err)
+		}
+		fastest := time.Hour
+		for range 3 {
+			start := time.Now()
+			resp, err := http.Post(testServer.URL+"/login", "application/json", bytes.NewBuffer(payload))
+			if err != nil {
+				t.Fatalf("HTTP POST /login failed: %v", err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("login as %q: expected 401, got %d", username, resp.StatusCode)
+			}
+			fastest = min(fastest, time.Since(start))
+		}
+		return fastest
+	}
+
+	wrongPassword := timeLogin("Trent")
+	unknownUser := timeLogin("NoSuchUser")
+	t.Logf("wrong password: %v, unknown user: %v", wrongPassword, unknownUser)
+	// without a dummy bcrypt compare, an unknown user returns ~100x faster
+	if unknownUser < wrongPassword/2 {
+		t.Errorf("unknown user took %v vs %v for a wrong password; timing reveals which usernames exist", unknownUser, wrongPassword)
+	}
+}

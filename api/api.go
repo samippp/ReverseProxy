@@ -53,7 +53,13 @@ func (h *Handler) RegisterHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
-	user, err := h.store.RegisterUser(r.Context(), createUser.Username, createUser.Password, createUser.Email)
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	user, err := h.store.RegisterUser(ctx, createUser.Username, createUser.Password, createUser.Email)
+	if errors.Is(err, store.ErrBusy) {
+		writeBusy(w)
+		return
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -84,6 +90,10 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
+	if errors.Is(err, store.ErrBusy) {
+		writeBusy(w)
+		return
+	}
 	if err != nil {
 		log.Printf("login failed for user=%s: %v", loginUser.Username, err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -102,6 +112,13 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		"token":      token,
 		"expires_in": strconv.FormatInt(expiresIn, 10),
 	})
+}
+
+// writeBusy tells the client to back off when password hashing is
+// saturated, instead of letting logins queue without bound.
+func writeBusy(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "1")
+	http.Error(w, "server busy, retry later", http.StatusServiceUnavailable)
 }
 
 func writeUser(w http.ResponseWriter, user generated.User) error {

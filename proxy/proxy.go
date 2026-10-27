@@ -3,6 +3,7 @@ package proxy
 
 import (
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -17,12 +18,29 @@ import (
 // under concurrent load, connections to a backend are pooled and
 // reused instead of being torn down and recreated for every request —
 // avoiding rapid ephemeral port churn (and exhaustion) under load.
+//
+// The timeouts turn a backend that black-holes connections or never
+// answers into a transport error, which retryTransport reports and
+// retries. Without them a request waits until the client gives up,
+// which doesn't count against the backend, so it stays in rotation.
 var sharedTransport = &http.Transport{
-	MaxIdleConns:        200,
-	MaxIdleConnsPerHost: 100,
-	MaxConnsPerHost:     100,
-	IdleConnTimeout:     90 * time.Second,
+	DialContext: (&net.Dialer{
+		Timeout:   dialTimeout,
+		KeepAlive: 30 * time.Second,
+	}).DialContext,
+	ResponseHeaderTimeout: responseHeaderTimeout,
+	MaxIdleConns:          200,
+	MaxIdleConnsPerHost:   100,
+	MaxConnsPerHost:       100,
+	IdleConnTimeout:       90 * time.Second,
 }
+
+const (
+	dialTimeout = 2 * time.Second
+	// responseHeaderTimeout should stay below clients' own timeouts, so
+	// a retry on another backend can still answer in time.
+	responseHeaderTimeout = 5 * time.Second
+)
 
 // sharedBufferPool recycles the 32KB buffers ReverseProxy copies
 // response bodies through. Without it, every proxied response allocates
@@ -52,8 +70,9 @@ func (p *bufferPool) Put(b []byte) {
 // retryTransport reports failed round trips to the balancer, so dead
 // backends leave rotation without waiting for a health check, and
 // retries idempotent, bodiless requests on a backend not yet tried.
-// Only transport errors (refused, reset, timed out) count; a backend
-// that answers, even with a 5xx, has responded and isn't retried.
+// Only transport errors (refused, reset, dial or response-header
+// timeout) count; a backend that answers, even with a 5xx, has
+// responded and isn't retried.
 type retryTransport struct {
 	next        http.RoundTripper
 	balancer    Balancer
